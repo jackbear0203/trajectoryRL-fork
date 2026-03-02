@@ -172,4 +172,4 @@ miner.submit(pack=pack, repo="youruser/your-pack", git_commit="b" * 40)
 | `trajectoryrl/base/miner.py` | `TrajectoryMiner` class — core logic |
 | `trajectoryrl/utils/opp_schema.py` | OPP v1 schema validation |
 | `trajectoryrl/utils/commitments.py` | Commitment string parsing |
-| `tests/test_miner.py` | Test suite (43 tests) |
+| `tests/test_miner.py` | Test suite (52 tests) |

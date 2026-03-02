@@ -205,7 +205,6 @@ class MinerConfig:
         pack_repo: GitHub repo as "owner/repo" — required for daemon mode.
         repo_path: Local git clone path — required for daemon mode.
         check_interval: Seconds between daemon loop iterations.
-        log_level: Logging level.
     """
 
     wallet_name: str = "miner"
@@ -217,7 +216,6 @@ class MinerConfig:
     pack_repo: str = ""
     repo_path: str = ""
     check_interval: int = 3600
-    log_level: str = "INFO"
 
     def __post_init__(self):
         if not self.pack_path and not self.agents_md_path:
@@ -256,5 +254,4 @@ class MinerConfig:
             pack_repo=os.getenv("PACK_REPO", ""),
             repo_path=os.getenv("REPO_PATH", ""),
             check_interval=int(os.getenv("CHECK_INTERVAL", "3600")),
-            log_level=os.getenv("LOG_LEVEL", "INFO"),
         )

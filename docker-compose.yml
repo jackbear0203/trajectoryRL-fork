@@ -207,7 +207,7 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
-      - ./packs:/app/packs
+      - ./packs:/app/packs  # no :ro — daemon mode writes pack.json and runs git push
       - ./logs:/app/logs
     networks:
       - trajectoryrl

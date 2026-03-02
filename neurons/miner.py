@@ -204,7 +204,7 @@ async def _run_daemon():
             # 6. Sleep
             await asyncio.sleep(config.check_interval)
 
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, asyncio.CancelledError):
             logger.info("Daemon stopped by user")
             break
         except Exception:
