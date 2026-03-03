@@ -278,7 +278,11 @@ class TrajectoryMiner:
                 netuid=self.netuid,
                 data=commitment,
             )
-            logger.info("Commitment submitted successfully!")
+            block = self.subtensor.get_current_block()
+            logger.info(
+                "Commitment submitted at block %d (first-mover precedence)",
+                block,
+            )
             return True
         except bt.NotRegisteredError:
             logger.error(
