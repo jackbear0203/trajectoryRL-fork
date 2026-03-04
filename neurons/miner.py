@@ -274,20 +274,23 @@ def cmd_submit(args):
 
     pack = TrajectoryMiner.load_pack(args.pack_path)
 
-    success = miner.submit(
-        pack=pack,
-        pack_url=args.pack_url,
-    )
+    try:
+        success = miner.submit(
+            pack=pack,
+            pack_url=args.pack_url,
+        )
 
-    if success:
-        pack_hash = TrajectoryMiner.compute_pack_hash(pack)
-        print(f"Submitted successfully!")
-        print(f"  Pack hash: {pack_hash}")
-        print(f"  Pack URL:  {args.pack_url}")
-        return 0
-    else:
-        print("Submission failed. Check logs for details.")
-        return 1
+        if success:
+            pack_hash = TrajectoryMiner.compute_pack_hash(pack)
+            print(f"Submitted successfully!")
+            print(f"  Pack hash: {pack_hash}")
+            print(f"  Pack URL:  {args.pack_url}")
+            return 0
+        else:
+            print("Submission failed. Check logs for details.")
+            return 1
+    finally:
+        miner.close()
 
 
 def cmd_status(args):
@@ -302,21 +305,24 @@ def cmd_status(args):
         network=args.network,
     )
 
-    raw = miner.get_current_commitment()
-    if raw is None:
-        print("No commitment found on-chain.")
-        return 1
+    try:
+        raw = miner.get_current_commitment()
+        if raw is None:
+            print("No commitment found on-chain.")
+            return 1
 
-    print(f"Raw commitment: {raw}")
-    parsed = parse_commitment(raw)
-    if parsed:
-        pack_hash, pack_url = parsed
-        print(f"  Pack hash: {pack_hash}")
-        print(f"  Pack URL:  {pack_url}")
-    else:
-        print("  (could not parse commitment)")
+        print(f"Raw commitment: {raw}")
+        parsed = parse_commitment(raw)
+        if parsed:
+            pack_hash, pack_url = parsed
+            print(f"  Pack hash: {pack_hash}")
+            print(f"  Pack URL:  {pack_url}")
+        else:
+            print("  (could not parse commitment)")
 
-    return 0
+        return 0
+    finally:
+        miner.close()
 
 
 # ===================================================================

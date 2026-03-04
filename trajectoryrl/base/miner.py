@@ -75,6 +75,15 @@ class TrajectoryMiner:
             self._subtensor = bt.Subtensor(network=self.network)
         return self._subtensor
 
+    def close(self):
+        """Close the Subtensor websocket so the process can exit cleanly."""
+        if self._subtensor is not None:
+            try:
+                self._subtensor.substrate.close()
+            except Exception:
+                pass
+            self._subtensor = None
+
     # ------------------------------------------------------------------
     # Pack building
     # ------------------------------------------------------------------
