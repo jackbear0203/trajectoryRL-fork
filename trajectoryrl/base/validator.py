@@ -757,6 +757,14 @@ class TrajectoryValidator:
                     f"Miner {miner_uid}: {scenario_name} -> "
                     f"score={result.score:.3f}{cost_str}, gate={gate_str}"
                 )
+                if result.model_usage:
+                    for m in result.model_usage:
+                        logger.info(
+                            f"Miner {miner_uid}: {scenario_name}   "
+                            f"{m.get('model', '?')}: "
+                            f"${m.get('cost_usd', 0):.4f} "
+                            f"({m.get('count', 0)} calls)"
+                        )
             except Exception as e:
                 logger.error(
                     f"Miner {miner_uid}: {scenario_name} failed: {e}",
