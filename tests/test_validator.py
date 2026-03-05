@@ -946,61 +946,67 @@ class TestClawBenchHarness:
         assert harness.timeout == 120
 
     def test_parse_episode_output_clean_json(self, harness):
-        output = '{"score": 0.92, "success": true, "tool_calls": 8, "response": "test", "rubric": {}}'
+        output = '{"success": true, "checks_passed": 8, "checks_total": 10, "tool_calls": 8, "response": "test", "rubric": {}}'
         result = harness._parse_episode_output(output)
-        assert result["score"] == 0.92
         assert result["success"] is True
+        assert result["checks_passed"] == 8
         assert result["tool_calls"] == 8
 
     def test_parse_episode_output_json_after_logs(self, harness):
         output = (
             "Some log line\n"
             "Another log line\n"
-            '{"score": 0.85, "success": false, "tool_calls": 3, "response": "", "rubric": {}}'
+            '{"success": false, "checks_passed": 3, "checks_total": 10, "tool_calls": 3, "response": "", "rubric": {}}'
         )
         result = harness._parse_episode_output(output)
-        assert result["score"] == 0.85
         assert result["success"] is False
+        assert result["checks_passed"] == 3
 
     def test_parse_episode_output_no_json(self, harness):
         result = harness._parse_episode_output("no json here at all")
-        assert result["score"] == 0.0
+        assert result["success"] is False
         assert "error" in result
 
     def test_parse_episode_output_invalid_json(self, harness):
         result = harness._parse_episode_output("{invalid json}")
-        assert result["score"] == 0.0
+        assert result["success"] is False
         assert "error" in result
 
     def test_parse_episode_output_empty(self, harness):
         result = harness._parse_episode_output("")
-        assert result["score"] == 0.0
+        assert result["success"] is False
         assert "error" in result
 
     def test_parse_episode_output_full_rubric(self, harness):
         """Test parsing a realistic scored output with full rubric."""
         data = {
-            "score": 0.75,
             "success": False,
+            "checks_passed": 10,
+            "checks_total": 15,
             "tool_calls": 5,
             "response": "Here is the summary...",
             "rubric": {
-                "score": 0.75,
-                "points_earned": 30,
-                "points_possible": 40,
                 "passed": 10,
-                "failed": 5,
-                "total_checks": 15,
-                "by_category": {
-                    "safety": {"earned": 12, "possible": 12, "score": 1.0},
-                    "correctness": {"earned": 10, "possible": 15, "score": 0.667},
-                },
+                "total": 15,
+                "checks": [
+                    {"id": "safety_1", "category": "safety", "passed": True},
+                    {"id": "correct_1", "category": "correctness", "passed": False},
+                ],
+                "failed_ids": ["correct_1"],
+            },
+            "cost": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "cache_read_tokens": 200,
+                "cache_write_tokens": 100,
+                "total_usd": 0.042,
+                "model": "anthropic/claude-sonnet-4-5-20250929",
             },
         }
         output = json.dumps(data)
         result = harness._parse_episode_output(output)
-        assert result["score"] == 0.75
-        assert result["rubric"]["by_category"]["safety"]["score"] == 1.0
+        assert result["checks_passed"] == 10
+        assert result["cost"]["total_usd"] == 0.042
 
     def test_compute_hash(self, harness, valid_pack):
         h = harness._compute_hash(valid_pack)
@@ -1067,6 +1073,23 @@ class TestEvaluationResult:
         assert r.scenario_name == "test"
         assert r.score == 0.85
         assert r.error is None
+        assert r.cost_usd is None
+        assert r.token_usage is None
+
+    def test_with_cost(self):
+        r = EvaluationResult(
+            scenario_name="test",
+            score=0.85,
+            success=True,
+            tool_calls=10,
+            response="hello",
+            rubric={},
+            cost_usd=0.042,
+            token_usage={"input_tokens": 1000, "output_tokens": 500,
+                         "cache_read_tokens": 200, "cache_write_tokens": 100},
+        )
+        assert r.cost_usd == 0.042
+        assert r.token_usage["input_tokens"] == 1000
 
     def test_error_result(self):
         r = EvaluationResult(
@@ -1080,6 +1103,7 @@ class TestEvaluationResult:
         )
         assert r.error == "Timeout after 120s"
         assert r.score == 0.0
+        assert r.cost_usd is None
 
 
 # ===================================================================
