@@ -40,16 +40,18 @@ Winning policies get packaged and licensed to agent platforms who pay for:
 
 **Example ROI** (1,000 tasks/day):
 ```
-Unoptimized Opus 4.6:                    $12,300/month
+Unoptimized Claude Opus 4.6:             $12,300/month
 
 Stage 1 — Prompt optimization (AGENTS.md tuning):
   Optimized prompts + stop rules:         $3,300/month  (73% reduction)
 
 Stage 2 — Hybrid routing (AGENTS.md + injected skills):
   Multi-LLM dynamic routing:               $900/month  (93% reduction)
-    ├─ Haiku 4.5 handles 70% of sub-tasks (tool calls, lookups)
-    ├─ Sonnet 4.5 handles 25% (reasoning, drafting)
-    └─ Opus 4.6 handles 5% (complex judgment calls)
+    ├─ Qwen 3.5 (Alibaba) handles 40% of sub-tasks (tool calls, lookups)
+    ├─ GLM-5 (Z.ai) handles 25% (structured extraction, formatting)
+    ├─ Gemini 3 Flash (Google) handles 20% (search, summarization)
+    ├─ GPT-5.2 (OpenAI) handles 10% (reasoning, drafting)
+    └─ Claude Opus 4.6 (Anthropic) handles 5% (complex judgment calls)
 ```
 
 Both stages use the same PolicyBundle format — AGENTS.md controls routing logic, injected skills handle model dispatch. The pack system is general enough to express prompt-only optimizations *and* multi-model orchestration.
