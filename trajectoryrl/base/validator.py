@@ -1052,9 +1052,10 @@ class TrajectoryValidator:
     async def _set_fallback_weights(self, reason: str = "No eligible miners"):
         """Set weights to subnet owner UID when no miners qualify.
 
-        Directs all emission to the subnet owner so it is not wasted on
-        inactive or unregistered UIDs.  The validator must always call
-        set_weights every tempo to avoid being deregistered by the chain.
+        Miner incentive directed to the owner hotkey is burned by the
+        chain (not paid to the owner), so this effectively burns miner
+        emissions until a qualifying miner submits.  The validator must
+        always call set_weights every tempo to avoid deregistration.
         """
         try:
             # Verify wallet is accessible before attempting on-chain call
