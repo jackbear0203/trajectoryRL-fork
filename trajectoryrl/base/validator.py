@@ -989,26 +989,23 @@ class TrajectoryValidator:
 
         num_active = len(scores)
 
-        # Use cost-based winner selection if cost data available
-        if costs:
-            weights_dict = self.scorer.select_winner_by_cost(
-                costs=costs,
-                qualified=qualified,
-                first_mover_data=self.first_mover_data,
-                cost_delta=self.config.cost_delta,
-                num_active_miners=num_active,
-                uid_to_hotkey=uid_to_hotkey,
-            )
-        else:
-            # Fallback to score-based selection (transition period)
-            logger.info("No cost data available, using score-based selection")
-            weights_dict = self.scorer.select_winner(
-                scores=scores,
-                first_mover_data=self.first_mover_data,
-                delta=self.config.delta_threshold,
-                num_active_miners=num_active,
-                uid_to_hotkey=uid_to_hotkey,
-            )
+        # Cost data is required for winner selection. If no cost data
+        # is available (should not happen in normal operation), fall back
+        # to owner-UID weights rather than using score-based selection.
+        if not costs:
+            logger.warning("No cost data available, setting fallback weights")
+            self._build_report_metadata(active, scores, costs, qualified)
+            await self._set_fallback_weights()
+            return
+
+        weights_dict = self.scorer.select_winner_by_cost(
+            costs=costs,
+            qualified=qualified,
+            first_mover_data=self.first_mover_data,
+            cost_delta=self.config.cost_delta,
+            num_active_miners=num_active,
+            uid_to_hotkey=uid_to_hotkey,
+        )
 
         # Log results
         logger.info("=" * 60)
