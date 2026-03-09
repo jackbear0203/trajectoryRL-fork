@@ -94,8 +94,8 @@ WALLET_HOTKEY=default
 NETUID=11
 NETWORK=finney
 CLAWBENCH_LLM_API_KEY=your-api-key
-CLAWBENCH_LLM_BASE_URL=https://llm.chutes.ai/v1
-CLAWBENCH_DEFAULT_MODEL=chutes/zai-org/GLM-5-TEE
+CLAWBENCH_LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
+CLAWBENCH_DEFAULT_MODEL=zhipu/glm-5
 EOF
 ```
 
@@ -105,9 +105,9 @@ EOF
 | `WALLET_HOTKEY` | Yes | Hotkey name (usually `default`) |
 | `NETUID` | Yes | Subnet UID (`11`) |
 | `NETWORK` | Yes | `finney`, `test`, or `local` |
-| `CLAWBENCH_LLM_API_KEY` | Yes | API key for the LLM provider (e.g. [Chutes](https://chutes.ai)) |
+| `CLAWBENCH_LLM_API_KEY` | Yes | API key for the LLM provider (e.g. [Zhipu AI](https://bigmodel.cn), [Chutes](https://chutes.ai)) |
 | `CLAWBENCH_LLM_BASE_URL` | Yes | Base URL for the OpenAI-compatible API |
-| `CLAWBENCH_DEFAULT_MODEL` | Yes | LLM model for evaluation (default: `chutes/zai-org/GLM-5-TEE`) |
+| `CLAWBENCH_DEFAULT_MODEL` | Yes | LLM model for evaluation (default: `zhipu/glm-5`) |
 
 #### 3. Start validator
 
@@ -145,8 +145,8 @@ WALLET_HOTKEY=default
 NETUID=11
 NETWORK=finney
 LLM_API_KEY=your-api-key
-LLM_BASE_URL=https://llm.chutes.ai/v1
-LLM_MODEL=chutes/zai-org/GLM-5-TEE
+LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
+LLM_MODEL=zhipu/glm-5
 EOF
 ```
 
@@ -182,6 +182,8 @@ python neurons/miner.py status
 cd clawbench
 pip install -e .
 # Set CLAWBENCH_LLM_API_KEY, CLAWBENCH_LLM_BASE_URL, CLAWBENCH_DEFAULT_MODEL in .env
+# Example Zhipu: CLAWBENCH_LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/, CLAWBENCH_DEFAULT_MODEL=zhipu/glm-5
+# Example Chutes: CLAWBENCH_LLM_BASE_URL=https://llm.chutes.ai/v1, CLAWBENCH_DEFAULT_MODEL=chutes/zai-org/GLM-5-TEE
 
 # Test a single scenario
 python scripts/run_episode.py --scenario inbox_triage --variant optimized --json
