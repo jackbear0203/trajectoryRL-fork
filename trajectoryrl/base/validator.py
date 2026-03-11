@@ -36,14 +36,16 @@ from ..utils.epoch_context import generate_epoch_context, render_context_preambl
 from ..utils.commitments import MinerCommitment, fetch_all_commitments
 from ..utils.ncd import deduplicate_packs
 from ..utils.status_reporter import report_status
+from .. import __version__
 
 logger = logging.getLogger(__name__)
 
 OWNER_UID = 74
+BURN_FRACTION = 0.50  # 50% of miner emissions burned via owner UID
 EVAL_START_BLOCK = 0
 # TODO: Set SHADOW_MODE = False for official mainnet launch.
 # Shadow mode runs real evals and logs results, but always sets weights to owner UID 74.
-SHADOW_MODE = True
+SHADOW_MODE = False
 
 
 class TrajectoryValidator:
@@ -70,7 +72,7 @@ class TrajectoryValidator:
         self._setup_logging()
 
         logger.info("=" * 60)
-        logger.info("TrajectoryRL Validator v2.0.0")
+        logger.info(f"TrajectoryRL Validator v{__version__}")
         logger.info("=" * 60)
 
         logger.info("Initializing Bittensor components...")
@@ -113,6 +115,12 @@ class TrajectoryValidator:
 
         # Per-scenario qualification (latest, not EMA): {hotkey: {scenario: bool}}
         self.scenario_qualified: Dict[str, Dict[str, bool]] = {}
+
+        # Latest token usage per hotkey/scenario: {hotkey: {scenario: {input_tokens, ...}}}
+        self.latest_token_usage: Dict[str, Dict[str, Dict[str, int]]] = {}
+
+        # Latest model usage per hotkey/scenario: {hotkey: {scenario: [model_entry, ...]}}
+        self.latest_model_usage: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
 
         # Track the pack_hash that each hotkey's EMA is based on.
         # EMA resets when pack_hash changes.
@@ -236,6 +244,8 @@ class TrajectoryValidator:
             self.ema_scores[hotkey] = {}
             self.ema_costs[hotkey] = {}
             self.scenario_qualified[hotkey] = {}
+            self.latest_token_usage.pop(hotkey, None)
+            self.latest_model_usage.pop(hotkey, None)
             self._ema_pack_hash[hotkey] = pack_hash
 
         # Score EMA (informational, kept for logging)
@@ -609,6 +619,12 @@ class TrajectoryValidator:
                 self.last_eval_block[hotkey] = current_block
                 evaluated_count += 1
 
+                # Store latest token & model usage for metadata reporting
+                if eval_result.get("token_usage"):
+                    self.latest_token_usage[hotkey] = eval_result["token_usage"]
+                if eval_result.get("model_usage"):
+                    self.latest_model_usage[hotkey] = eval_result["model_usage"]
+
                 # First-mover tracks cost (lower = better)
                 total_cost = self.compute_total_cost_from_ema(hotkey)
                 if total_cost is not None:
@@ -823,6 +839,8 @@ class TrajectoryValidator:
         scenario_scores: Dict[str, float] = {}
         scenario_costs: Dict[str, float] = {}
         scenario_qualified: Dict[str, bool] = {}
+        scenario_token_usage: Dict[str, Dict[str, int]] = {}
+        scenario_model_usage: Dict[str, List[Dict[str, Any]]] = {}
 
         for scenario_name in eval_scenarios:
             try:
@@ -838,6 +856,10 @@ class TrajectoryValidator:
                 scenario_qualified[scenario_name] = result.success
                 if result.cost_usd is not None:
                     scenario_costs[scenario_name] = result.cost_usd
+                if result.token_usage:
+                    scenario_token_usage[scenario_name] = result.token_usage
+                if result.model_usage:
+                    scenario_model_usage[scenario_name] = result.model_usage
 
                 cost_str = f", cost=${result.cost_usd:.4f}" if result.cost_usd is not None else ""
                 gate_str = "PASS" if result.success else "FAIL"
@@ -889,6 +911,8 @@ class TrajectoryValidator:
             "scores": scenario_scores,
             "costs": scenario_costs,
             "qualified": scenario_qualified,
+            "token_usage": scenario_token_usage,
+            "model_usage": scenario_model_usage,
         }
 
     # ------------------------------------------------------------------
@@ -942,6 +966,13 @@ class TrajectoryValidator:
             ema_costs = self.ema_costs.get(hk, {})
             qualified_scenarios = self.scenario_qualified.get(hk, {})
 
+            # Latest token/model usage for this miner
+            hk_token_usage = self.latest_token_usage.get(hk, {})
+            hk_model_usage = self.latest_model_usage.get(hk, {})
+
+            # Aggregate token totals across scenarios
+            total_tokens: Dict[str, int] = {}
+
             for scenario_name in self.scenarios.keys():
                 scenario_entry: Dict[str, Any] = {
                     "score": round(ema_scores.get(scenario_name, 0.0), 4),
@@ -951,9 +982,21 @@ class TrajectoryValidator:
                 scenario_cost = ema_costs.get(scenario_name)
                 if scenario_cost is not None:
                     scenario_entry["cost"] = round(scenario_cost, 4)
+                # Per-scenario token usage
+                s_tokens = hk_token_usage.get(scenario_name)
+                if s_tokens:
+                    scenario_entry["token_usage"] = s_tokens
+                    for k, v in s_tokens.items():
+                        total_tokens[k] = total_tokens.get(k, 0) + v
+                # Per-scenario model usage
+                s_models = hk_model_usage.get(scenario_name)
+                if s_models:
+                    scenario_entry["model_usage"] = s_models
                 scenario_scores[scenario_name] = scenario_entry
 
             entry["scenario_scores"] = scenario_scores
+            if total_tokens:
+                entry["total_token_usage"] = total_tokens
             miner_scores[hk] = entry
 
         self._report_metadata["miner_scores"] = miner_scores
@@ -1069,18 +1112,32 @@ class TrajectoryValidator:
             uid_to_hotkey=uid_to_hotkey,
         )
 
+        # Apply burn: scale miner weights by (1 - BURN_FRACTION),
+        # give BURN_FRACTION to owner UID (burned by the chain).
+        for uid in weights_dict:
+            weights_dict[uid] *= (1.0 - BURN_FRACTION)
+        weights_dict[OWNER_UID] = (
+            weights_dict.get(OWNER_UID, 0.0) + BURN_FRACTION
+        )
+
         # Log results
         logger.info("=" * 60)
         logger.info("WEIGHT RESULTS")
+        logger.info(f"Burn fraction: {BURN_FRACTION:.0%} to owner UID {OWNER_UID}")
         logger.info("=" * 60)
         for uid, weight in sorted(
             weights_dict.items(),
             key=lambda x: costs.get(x[0], scores.get(x[0], 0)),
         ):
+            if uid == OWNER_UID and uid not in uid_to_hotkey:
+                logger.info(
+                    f"  Owner UID {uid}: weight={weight:.4f} (burn)"
+                )
+                continue
             marker = ""
             hk = uid_to_hotkey.get(uid, "?")
             if weight > 0:
-                marker = " <- WINNER" if weight == 1.0 else f" <- TOP-{sum(1 for w in weights_dict.values() if w >= weight)}"
+                marker = " <- WINNER" if weight == 0.5 else f" <- TOP-{sum(1 for u, w in weights_dict.items() if w >= weight and u != OWNER_UID)}"
             gate = "PASS" if qualified.get(uid, False) else "FAIL"
             cost_str = f"${costs[uid]:.4f}" if uid in costs else "n/a"
             logger.info(
