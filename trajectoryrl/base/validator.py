@@ -43,7 +43,7 @@ OWNER_UID = 74
 EVAL_START_BLOCK = 0
 # TODO: Set SHADOW_MODE = False for official mainnet launch.
 # Shadow mode runs real evals and logs results, but always sets weights to owner UID 74.
-SHADOW_MODE = True
+SHADOW_MODE = False
 
 
 class TrajectoryValidator:
