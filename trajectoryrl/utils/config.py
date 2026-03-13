@@ -160,25 +160,31 @@ class ValidatorConfig:
         load_dotenv(dotenv_path)
 
         return cls(
+            # --- Bittensor ---
             wallet_name=os.getenv("WALLET_NAME", "validator"),
             wallet_hotkey=os.getenv("WALLET_HOTKEY", "default"),
             netuid=int(os.getenv("NETUID", "11")),
             network=os.getenv("NETWORK", "finney"),
+            # --- Paths ---
             clawbench_path=Path(
                 os.getenv(
                     "CLAWBENCH_PATH",
                     str(Path(__file__).parent.parent.parent / "clawbench")
                 )
             ),
-            eval_interval_blocks=int(os.getenv("EVAL_INTERVAL_BLOCKS", "7200")),
-            ema_alpha=float(os.getenv("EMA_ALPHA", "0.3")),
-            log_level=os.getenv("LOG_LEVEL", "INFO"),
-            similarity_threshold=float(os.getenv("SIMILARITY_THRESHOLD", "0.80")),
-            inactivity_blocks=int(os.getenv("INACTIVITY_BLOCKS", "14400")),
-            weight_interval_blocks=int(os.getenv("WEIGHT_INTERVAL_BLOCKS", "360")),
+            ema_state_path=Path(os.getenv("EMA_STATE_PATH", "/var/lib/trajectoryrl/ema_state.json")),
+            # --- LLM ---
             clawbench_default_model=os.getenv("CLAWBENCH_DEFAULT_MODEL", DEFAULT_CLAWBENCH_MODEL),
             clawbench_api_key=os.getenv("CLAWBENCH_LLM_API_KEY", ""),
             clawbench_base_url=os.getenv("CLAWBENCH_LLM_BASE_URL", DEFAULT_LLM_BASE_URL),
+            # --- Operational ---
+            log_level=os.getenv("LOG_LEVEL", "INFO"),
+            # --- IM parameters are hardcoded (dataclass defaults) ---
+            # Do NOT load from env: ema_alpha, cost_ema_alpha, cost_delta,
+            # rho_reliability, consensus_epsilon, bootstrap_threshold,
+            # similarity_threshold, max_commitment_age_blocks,
+            # inactivity_blocks, eval_interval_blocks, weight_interval_blocks.
+            # All validators must use identical IM values for consensus.
         )
 
 

@@ -35,7 +35,7 @@ from ..utils.github import PackFetcher
 from ..utils.epoch_context import generate_epoch_context, render_context_preamble
 from ..utils.commitments import MinerCommitment, fetch_all_commitments
 from ..utils.ncd import deduplicate_packs
-from ..utils.status_reporter import report_status
+from ..utils.status_reporter import heartbeat, submit_eval
 from .. import __version__
 
 logger = logging.getLogger(__name__)
@@ -143,6 +143,12 @@ class TrajectoryValidator:
 
         # Weight cadence tracking
         self.last_weight_block: int = 0
+
+        # Eval count per hotkey for the current pack (resets on pack change)
+        self._eval_counts: Dict[str, int] = {}
+
+        # Timestamp of the most recent successful set_weights call
+        self._last_set_weights_at: Optional[int] = None
 
         # Load scenarios
         self.scenarios = self._load_scenarios()
@@ -406,9 +412,8 @@ class TrajectoryValidator:
         - eval_interval (~24h / 7200 blocks): evaluate marked packs, update EMA.
         - tempo (~72 min / 360 blocks): compute weights from EMA, set_weights.
         """
-        self._report_metadata: Dict[str, Any] = {}
         self._start_time = time.time()
-        self._last_report_time: float = 0.0
+        self._last_heartbeat_time: float = 0.0
 
         logger.info("Starting validator main loop...")
         logger.info(
@@ -470,14 +475,12 @@ class TrajectoryValidator:
                     self.last_weight_block = current_block
 
                 now = time.time()
-                if now - self._last_report_time >= 600:
-                    await report_status(
+                if now - self._last_heartbeat_time >= 600:
+                    await heartbeat(
                         self.wallet,
-                        node_type="validator",
-                        uptime=int(now - self._start_time),
-                        metadata=self._report_metadata or None,
+                        last_set_weights_at=self._last_set_weights_at,
                     )
-                    self._last_report_time = now
+                    self._last_heartbeat_time = now
                 await asyncio.sleep(60)
 
             except KeyboardInterrupt:
@@ -611,6 +614,12 @@ class TrajectoryValidator:
             )
 
             if eval_result is not None:
+                ema_reset = self._ema_pack_hash.get(hotkey) != commitment.pack_hash
+                if ema_reset:
+                    self._eval_counts[hotkey] = 0
+                self._eval_counts[hotkey] = self._eval_counts.get(hotkey, 0) + 1
+                eval_count = self._eval_counts[hotkey]
+
                 self._update_ema(
                     hotkey, commitment.pack_hash,
                     scenario_scores=eval_result["scores"],
@@ -625,6 +634,13 @@ class TrajectoryValidator:
                     self.latest_token_usage[hotkey] = eval_result["token_usage"]
                 if eval_result.get("model_usage"):
                     self.latest_model_usage[hotkey] = eval_result["model_usage"]
+
+                # Submit eval result to dashboard (fire-and-forget)
+                asyncio.ensure_future(
+                    self._fire_submit_eval(
+                        uid, commitment, eval_result, eval_count, ema_reset, current_block
+                    )
+                )
 
                 # First-mover tracks cost (lower = better)
                 total_cost = self.compute_total_cost_from_ema(hotkey)
@@ -732,7 +748,6 @@ class TrajectoryValidator:
             hotkey = commitment.hotkey
             last_block = self.last_eval_block.get(hotkey)
 
-            # Never evaluated = not yet active (but will be evaluated this cycle)
             if last_block is not None:
                 blocks_since = current_block - last_block
                 if blocks_since > self.config.inactivity_blocks:
@@ -917,91 +932,82 @@ class TrajectoryValidator:
         }
 
     # ------------------------------------------------------------------
-    # Report metadata
+    # Eval submission
     # ------------------------------------------------------------------
 
-    def _build_report_metadata(
+    async def _fire_submit_eval(
         self,
-        active: Dict[int, "MinerCommitment"],
-        scores: Dict[int, float],
-        costs: Dict[int, float],
-        qualified: Dict[int, bool],
-        weights_dict: Optional[Dict[int, float]] = None,
+        uid: int,
+        commitment: "MinerCommitment",
+        eval_result: Dict,
+        eval_count: int,
+        ema_reset: bool,
+        block_height: int,
     ) -> None:
-        """Build report metadata from ALL active miners.
+        """Build and fire the /api/scores/submit payload for one miner eval.
 
-        Uses commitments for pack_url and EMA state for score/cost so
-        that the metadata always contains the full picture regardless of
-        which weight-setting path was taken.
+        Fire-and-forget: any error is logged and discarded.
         """
-        if weights_dict is None:
-            weights_dict = {}
-
-        # Get scenario weights for per-scenario metadata
+        hotkey = commitment.hotkey
         scenario_weights = {
             name: cfg.get("weight", 1.0)
             for name, cfg in self.scenarios.items()
         }
 
-        miner_scores: Dict[str, Dict[str, Any]] = {}
-        for uid, commitment in active.items():
-            hk = commitment.hotkey
+        raw_scores = eval_result["scores"]
+        raw_costs = eval_result.get("costs") or {}
+
+        # Aggregate raw score (weighted mean across scenarios)
+        total_w = sum(scenario_weights.get(s, 1.0) for s in raw_scores)
+        raw_score = (
+            sum(scenario_weights.get(s, 1.0) * v for s, v in raw_scores.items()) / total_w
+            if total_w > 0 else 0.0
+        )
+
+        # Aggregate raw cost (weighted mean across scenarios)
+        cost_total_w = sum(scenario_weights.get(s, 1.0) for s in raw_costs)
+        raw_cost = (
+            sum(scenario_weights.get(s, 1.0) * v for s, v in raw_costs.items()) / cost_total_w
+            if cost_total_w > 0 else 0.0
+        )
+
+        # Per-scenario results
+        scenario_results: Dict[str, Any] = {}
+        for sname, raw_s in raw_scores.items():
             entry: Dict[str, Any] = {
-                "uid": uid,
-                "pack_url": commitment.pack_url,
-                "score": round(scores.get(uid, 0), 4),
-                "weight": round(weights_dict.get(uid, 0), 4),
-                "qualified": qualified.get(uid, False),
+                "score": round(raw_s, 4),
+                "ema_score": round(self.ema_scores.get(hotkey, {}).get(sname, 0.0), 4),
+                "weight": round(scenario_weights.get(sname, 1.0), 4),
+                "qualified": (eval_result.get("qualified") or {}).get(sname, False),
             }
-            cost = costs.get(uid)
-            if cost is None:
-                cost_from_ema = self.compute_total_cost_from_ema(hk)
-                if cost_from_ema is not None:
-                    cost = cost_from_ema
-            if cost is not None:
-                entry["cost"] = round(cost, 4)
+            if sname in raw_costs:
+                entry["cost"] = round(raw_costs[sname], 4)
+                entry["ema_cost"] = round(self.ema_costs.get(hotkey, {}).get(sname, 0.0), 4)
+            tu = (eval_result.get("token_usage") or {}).get(sname)
+            if tu:
+                entry["token_usage"] = tu
+            mu = (eval_result.get("model_usage") or {}).get(sname)
+            if mu:
+                entry["model_usage"] = mu
+            scenario_results[sname] = entry
 
-            # Build scenario_scores from EMA state
-            scenario_scores: Dict[str, Dict[str, Any]] = {}
-            ema_scores = self.ema_scores.get(hk, {})
-            ema_costs = self.ema_costs.get(hk, {})
-            qualified_scenarios = self.scenario_qualified.get(hk, {})
-
-            # Latest token/model usage for this miner
-            hk_token_usage = self.latest_token_usage.get(hk, {})
-            hk_model_usage = self.latest_model_usage.get(hk, {})
-
-            # Aggregate token totals across scenarios
-            total_tokens: Dict[str, int] = {}
-
-            for scenario_name in self.scenarios.keys():
-                scenario_entry: Dict[str, Any] = {
-                    "score": round(ema_scores.get(scenario_name, 0.0), 4),
-                    "weight": round(scenario_weights.get(scenario_name, 1.0), 4),
-                    "qualified": qualified_scenarios.get(scenario_name, False),
-                }
-                scenario_cost = ema_costs.get(scenario_name)
-                if scenario_cost is not None:
-                    scenario_entry["cost"] = round(scenario_cost, 4)
-                # Per-scenario token usage
-                s_tokens = hk_token_usage.get(scenario_name)
-                if s_tokens:
-                    scenario_entry["token_usage"] = s_tokens
-                    for k, v in s_tokens.items():
-                        total_tokens[k] = total_tokens.get(k, 0) + v
-                # Per-scenario model usage
-                s_models = hk_model_usage.get(scenario_name)
-                if s_models:
-                    scenario_entry["model_usage"] = s_models
-                scenario_scores[scenario_name] = scenario_entry
-
-            entry["scenario_scores"] = scenario_scores
-            if total_tokens:
-                entry["total_token_usage"] = total_tokens
-            miner_scores[hk] = entry
-
-        self._report_metadata["miner_scores"] = miner_scores
-        self._report_metadata["miners_evaluated"] = len(miner_scores)
+        await submit_eval(
+            self.wallet,
+            miner_hotkey=hotkey,
+            miner_uid=uid,
+            block_height=block_height,
+            score=round(raw_score, 4),
+            ema_score=round(self.compute_final_score_from_ema(hotkey), 4),
+            cost=round(raw_cost, 4),
+            ema_cost=round(self.compute_total_cost_from_ema(hotkey) or 0.0, 4),
+            weight=0.0,
+            qualified=self.is_fully_qualified(hotkey),
+            pack_url=commitment.pack_url,
+            pack_hash=commitment.pack_hash,
+            eval_count=eval_count,
+            ema_reset=ema_reset,
+            scenario_results=scenario_results,
+        )
 
     # ------------------------------------------------------------------
     # Weight setting
@@ -1051,7 +1057,6 @@ class TrajectoryValidator:
 
         if not scores:
             logger.warning("All miners have zero EMA score")
-            self._build_report_metadata(active, scores, costs, qualified)
             await self._set_fallback_weights()
             return
 
@@ -1089,7 +1094,6 @@ class TrajectoryValidator:
 
         if not scores:
             logger.warning("All scored miners excluded by NCD dedup")
-            self._build_report_metadata(active, {}, {}, {})
             await self._set_fallback_weights()
             return
 
@@ -1100,7 +1104,6 @@ class TrajectoryValidator:
         # to owner-UID weights rather than using score-based selection.
         if not costs:
             logger.warning("No cost data available, setting fallback weights")
-            self._build_report_metadata(active, scores, costs, qualified)
             await self._set_fallback_weights()
             return
 
@@ -1147,9 +1150,6 @@ class TrajectoryValidator:
                 f"score={scores.get(uid, 0):.3f}{marker}"
             )
 
-        # Update report metadata with ALL active miners (not just winners)
-        self._build_report_metadata(active, scores, costs, qualified, weights_dict)
-
         # Set weights on chain
         if SHADOW_MODE:
             await self._set_fallback_weights(reason="SHADOW MODE: eval complete")
@@ -1166,6 +1166,7 @@ class TrajectoryValidator:
                     wait_for_finalization=False,
                 )
                 logger.info("Weights set successfully")
+                self._last_set_weights_at = int(time.time())
             except Exception as e:
                 logger.error(f"Error setting weights: {e}", exc_info=True)
 
