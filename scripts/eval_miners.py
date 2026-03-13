@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Evaluate a single miner by UID using on-chain commitment data.
+"""Evaluate one or more miners by UID using on-chain commitment data.
 
-Reads the miner's commitment from the chain, fetches & verifies the pack,
+exec python -u scripts/eval_miners.py --miner-uid 225 "$@"
+
+Reads miner commitments from the chain, fetches & verifies packs,
 runs ClawBench evaluation on all scenarios, and prints results.
 No side effects: no weight setting, no EMA persistence, no on-chain writes.
 
@@ -9,23 +11,26 @@ Can be used as a Docker entrypoint (like neurons/validator.py) or standalone.
 
 Usage:
     # Evaluate miner UID 42 on finney:
-    python scripts/eval_single_miner.py --miner-uid 42
+    python scripts/eval_miners.py --miner-uid 42
+
+    # Evaluate multiple miners:
+    python scripts/eval_miners.py --miner-uid 42 43 44
 
     # Evaluate on testnet with custom wallet:
-    python scripts/eval_single_miner.py --miner-uid 42 --network test --wallet-name myval
+    python scripts/eval_miners.py --miner-uid 42 --network test --wallet-name myval
 
     # Run specific scenarios only:
-    python scripts/eval_single_miner.py --miner-uid 42 --scenarios client_escalation morning_brief
+    python scripts/eval_miners.py --miner-uid 42 43 --scenarios client_escalation morning_brief
 
     # Multiple consensus runs per scenario:
-    python scripts/eval_single_miner.py --miner-uid 42 --num-runs 3
+    python scripts/eval_miners.py --miner-uid 42 --num-runs 3
 
     # Override LLM settings:
-    python scripts/eval_single_miner.py --miner-uid 42 \
+    python scripts/eval_miners.py --miner-uid 42 \
         --model openai/gpt-4o --api-key sk-xxx --base-url https://api.openai.com/v1
 
     # Save full results to JSON:
-    python scripts/eval_single_miner.py --miner-uid 42 -o results.json
+    python scripts/eval_miners.py --miner-uid 42 43 -o results.json
 
 Environment variables (also read from .env.validator):
     WALLET_NAME               Bittensor wallet name        (default: validator)
@@ -46,7 +51,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -58,14 +63,14 @@ from trajectoryrl.utils.github import PackFetcher
 from trajectoryrl.utils.commitments import fetch_all_commitments
 from trajectoryrl.utils.epoch_context import generate_epoch_context, render_context_preamble
 
-logger = logging.getLogger("eval_single_miner")
+logger = logging.getLogger("eval_miners")
 
 DEFAULT_SCENARIOS = [
     "client_escalation",
-    "morning_brief",
-    "inbox_to_action",
-    "team_standup",
-    "inbox_triage",
+    #"morning_brief",
+    #"inbox_to_action",
+    #"team_standup",
+    #"inbox_triage",
 ]
 
 
@@ -74,43 +79,38 @@ def compute_epoch_seed(epoch: int, netuid: int = 11) -> int:
     return int(hashlib.sha256(raw).hexdigest()[:8], 16)
 
 
-async def run_evaluation(args):
-    import bittensor as bt
+async def evaluate_single_miner(
+    miner_uid: int,
+    args,
+    metagraph,
+    commitments,
+    harness: ClawBenchHarness,
+    epoch_seed: int,
+    context_preamble: str,
+    user_context,
+    scenarios: List[str],
+) -> Dict[str, EvaluationResult]:
+    """Evaluate a single miner and return per-scenario results (or None on setup failure)."""
 
-    # --- 1. Connect to chain (read-only) ---
-    logger.info(f"Connecting to {args.network} network...")
-    subtensor = bt.Subtensor(network=args.network)
-    metagraph = subtensor.metagraph(args.netuid)
-    current_block = subtensor.get_current_block()
-
-    logger.info(f"Network: {args.network}, Netuid: {args.netuid}, Block: {current_block}")
-    logger.info(f"Metagraph: {len(metagraph.hotkeys)} UIDs")
-
-    # --- 2. Validate miner UID ---
-    miner_uid = args.miner_uid
+    # --- Validate miner UID ---
     if miner_uid < 0 or miner_uid >= len(metagraph.hotkeys):
         logger.error(f"Invalid miner UID {miner_uid} (metagraph has {len(metagraph.hotkeys)} UIDs)")
-        return 1
+        return None
 
     miner_hotkey = metagraph.hotkeys[miner_uid]
     logger.info(f"Miner UID: {miner_uid}, Hotkey: {miner_hotkey}")
 
-    # --- 3. Read on-chain commitment ---
-    logger.info("Reading on-chain commitments...")
-    commitments = fetch_all_commitments(subtensor, args.netuid, metagraph)
-
     if miner_uid not in commitments:
         logger.error(f"No valid commitment found for miner UID {miner_uid}")
-        # Show available commitments for debugging
         if commitments:
             logger.info(f"Available UIDs with commitments: {sorted(commitments.keys())}")
-        return 1
+        return None
 
     commitment = commitments[miner_uid]
     logger.info(f"Commitment: hash={commitment.pack_hash[:16]}..., url={commitment.pack_url}")
     logger.info(f"Commitment block: {commitment.block_number}")
 
-    # --- 4. Fetch and verify pack ---
+    # --- Fetch and verify pack ---
     logger.info("Fetching and verifying pack...")
     fetcher = PackFetcher()
     verification = await fetcher.verify_submission(
@@ -120,71 +120,29 @@ async def run_evaluation(args):
 
     if not verification.valid:
         logger.error(f"Pack verification failed: {verification.error}")
-        return 1
+        return None
 
     pack = verification.pack_content
     logger.info(f"Pack verified: {len(pack.get('files', {}))} files")
     for fname in pack.get("files", {}):
         logger.info(f"  - {fname}")
 
-    # --- 5. Schema validation ---
+    # --- Schema validation ---
     lint_result = validate_opp_schema(pack)
     if not lint_result.passed:
         logger.error(f"Schema validation failed: {lint_result.issues}")
         if not args.force:
-            return 1
+            return None
         logger.warning("--force specified, continuing despite schema errors")
     else:
         logger.info("Schema validation passed")
 
-    # --- 6. Prepare ClawBench harness ---
-    clawbench_path = Path(args.clawbench_path)
-    model = args.model or os.getenv("CLAWBENCH_DEFAULT_MODEL", "zhipu/glm-5")
-    api_key = args.api_key or os.getenv("CLAWBENCH_LLM_API_KEY", "")
-    base_url = args.base_url or os.getenv(
-        "CLAWBENCH_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"
-    )
-
-    if not api_key:
-        logger.error("No LLM API key configured. Set CLAWBENCH_LLM_API_KEY or --api-key")
-        return 1
-
-    logger.info(f"ClawBench path: {clawbench_path}")
-    logger.info(f"Model: {model}")
-    logger.info(f"Base URL: {base_url}")
-    logger.info(f"Timeout: {args.timeout}s per scenario")
-
-    workspace_path = Path(args.workspace_path) if args.workspace_path else None
-
-    harness = ClawBenchHarness(
-        clawbench_path=clawbench_path,
-        timeout=args.timeout,
-        workspace_path=workspace_path,
-        clawbench_default_model=model,
-        clawbench_api_key=api_key,
-        clawbench_base_url=base_url,
-    )
-
-    # --- 7. Generate epoch context (same as validator) ---
-    epoch = current_block // 7200  # eval_interval_blocks default
-    epoch_seed = args.seed if args.seed is not None else compute_epoch_seed(epoch, args.netuid)
-    epoch_ctx = generate_epoch_context(epoch_seed)
-    context_preamble = render_context_preamble(epoch_ctx)
-    user_context = epoch_ctx.to_user_context()
-
-    logger.info(f"Epoch seed: {epoch_seed}")
-    logger.info(f"Context: [{epoch_ctx.user_name}, {epoch_ctx.user_role}]")
-
-    # --- 8. Run evaluations ---
-    scenarios = args.scenarios or DEFAULT_SCENARIOS
-    logger.info(f"Scenarios to evaluate: {scenarios}")
-
+    # --- Run evaluations ---
     results: Dict[str, EvaluationResult] = {}
-    total_cost = 0.0
 
     for scenario_name in scenarios:
         logger.info(f"\n{'=' * 60}")
-        logger.info(f"Running scenario: {scenario_name}")
+        logger.info(f"[UID {miner_uid}] Running scenario: {scenario_name}")
         logger.info(f"{'=' * 60}")
 
         try:
@@ -215,7 +173,6 @@ async def run_evaluation(args):
 
             if result.cost_usd is not None:
                 logger.info(f"  Cost: ${result.cost_usd:.4f}")
-                total_cost += result.cost_usd
 
             if result.token_usage:
                 tu = result.token_usage
@@ -268,7 +225,20 @@ async def run_evaluation(args):
                 error=str(e),
             )
 
-    # --- 9. Summary ---
+    return results
+
+
+def print_miner_summary(
+    miner_uid: int,
+    miner_hotkey: str,
+    commitment,
+    results: Dict[str, EvaluationResult],
+):
+    """Print evaluation summary for a single miner."""
+    total_score = 0.0
+    total_cost = 0.0
+    num_passed = 0
+
     print("\n")
     print("=" * 70)
     print(f"EVALUATION SUMMARY — Miner UID {miner_uid} ({miner_hotkey[:16]}...)")
@@ -277,9 +247,6 @@ async def run_evaluation(args):
     print("=" * 70)
     print(f"{'Scenario':<25} {'Score':>8} {'Gate':>6} {'Cost':>10} {'Calls':>6}")
     print("-" * 70)
-
-    total_score = 0.0
-    num_passed = 0
 
     for scenario_name, result in results.items():
         gate = "PASS" if result.success else "FAIL"
@@ -291,6 +258,8 @@ async def run_evaluation(args):
         total_score += result.score
         if result.success:
             num_passed += 1
+        if result.cost_usd is not None:
+            total_cost += result.cost_usd
 
     print("-" * 70)
     avg_score = total_score / len(results) if results else 0.0
@@ -305,9 +274,109 @@ async def run_evaluation(args):
     print(f"\nQualification: {'FULLY QUALIFIED' if all_passed else 'NOT QUALIFIED'}")
     print(f"  Passed: {num_passed}/{len(results)} scenarios")
 
-    # --- 10. Optional JSON output ---
-    if args.output:
-        output_data = {
+    return avg_score, num_passed, total_cost, all_passed
+
+
+async def run_evaluation(args):
+    import bittensor as bt
+
+    # --- 1. Connect to chain (read-only) ---
+    logger.info(f"Connecting to {args.network} network...")
+    subtensor = bt.Subtensor(network=args.network)
+    metagraph = subtensor.metagraph(args.netuid)
+    current_block = subtensor.get_current_block()
+
+    logger.info(f"Network: {args.network}, Netuid: {args.netuid}, Block: {current_block}")
+    logger.info(f"Metagraph: {len(metagraph.hotkeys)} UIDs")
+
+    # --- 2. Read on-chain commitments ---
+    logger.info("Reading on-chain commitments...")
+    commitments = fetch_all_commitments(subtensor, args.netuid, metagraph)
+
+    # --- 3. Prepare ClawBench harness ---
+    clawbench_path = Path(args.clawbench_path)
+    model = args.model or os.getenv("CLAWBENCH_DEFAULT_MODEL", "zhipu/glm-5")
+    api_key = args.api_key or os.getenv("CLAWBENCH_LLM_API_KEY", "")
+    base_url = args.base_url or os.getenv(
+        "CLAWBENCH_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"
+    )
+
+    if not api_key:
+        logger.error("No LLM API key configured. Set CLAWBENCH_LLM_API_KEY or --api-key")
+        return 1
+
+    logger.info(f"ClawBench path: {clawbench_path}")
+    logger.info(f"Model: {model}")
+    logger.info(f"Base URL: {base_url}")
+    logger.info(f"Timeout: {args.timeout}s per scenario")
+
+    workspace_path = Path(args.workspace_path) if args.workspace_path else None
+
+    harness = ClawBenchHarness(
+        clawbench_path=clawbench_path,
+        timeout=args.timeout,
+        workspace_path=workspace_path,
+        clawbench_default_model=model,
+        clawbench_api_key=api_key,
+        clawbench_base_url=base_url,
+    )
+
+    # --- 4. Generate epoch context (same as validator) ---
+    epoch = current_block // 7200  # eval_interval_blocks default
+    epoch_seed = args.seed if args.seed is not None else compute_epoch_seed(epoch, args.netuid)
+    epoch_ctx = generate_epoch_context(epoch_seed)
+    context_preamble = render_context_preamble(epoch_ctx)
+    user_context = epoch_ctx.to_user_context()
+
+    logger.info(f"Epoch seed: {epoch_seed}")
+    logger.info(f"Context: [{epoch_ctx.user_name}, {epoch_ctx.user_role}]")
+
+    scenarios = args.scenarios or DEFAULT_SCENARIOS
+    logger.info(f"Scenarios to evaluate: {scenarios}")
+
+    # --- 5. Evaluate each miner ---
+    miner_uids: List[int] = args.miner_uid
+    logger.info(f"Miner UIDs to evaluate: {miner_uids}")
+
+    all_miner_results: Dict[int, Dict[str, EvaluationResult]] = {}
+    any_failure = False
+
+    for miner_uid in miner_uids:
+        logger.info(f"\n{'#' * 70}")
+        logger.info(f"# Evaluating Miner UID {miner_uid}")
+        logger.info(f"{'#' * 70}")
+
+        results = await evaluate_single_miner(
+            miner_uid=miner_uid,
+            args=args,
+            metagraph=metagraph,
+            commitments=commitments,
+            harness=harness,
+            epoch_seed=epoch_seed,
+            context_preamble=context_preamble,
+            user_context=user_context,
+            scenarios=scenarios,
+        )
+
+        if results is None:
+            logger.error(f"Miner UID {miner_uid} failed setup, skipping.")
+            any_failure = True
+            continue
+
+        all_miner_results[miner_uid] = results
+
+    # --- 6. Print summaries ---
+    all_output_data = []
+    for miner_uid, results in all_miner_results.items():
+        commitment = commitments[miner_uid]
+        miner_hotkey = metagraph.hotkeys[miner_uid]
+        avg_score, num_passed, total_cost, all_passed = print_miner_summary(
+            miner_uid, miner_hotkey, commitment, results,
+        )
+        if not all_passed:
+            any_failure = True
+
+        all_output_data.append({
             "miner_uid": miner_uid,
             "miner_hotkey": miner_hotkey,
             "pack_hash": commitment.pack_hash,
@@ -315,43 +384,52 @@ async def run_evaluation(args):
             "commitment_block": commitment.block_number,
             "eval_block": current_block,
             "epoch_seed": epoch_seed,
-            "scenarios": {},
-        }
-        for name, r in results.items():
-            output_data["scenarios"][name] = {
-                "score": r.score,
-                "success": r.success,
-                "tool_calls": r.tool_calls,
-                "cost_usd": r.cost_usd,
-                "token_usage": r.token_usage,
-                "model_usage": r.model_usage,
-                "rubric": r.rubric,
-                "error": r.error,
-                "response": r.response,
-            }
-        output_data["summary"] = {
-            "avg_score": avg_score,
-            "passed": num_passed,
-            "total": len(results),
-            "fully_qualified": all_passed,
-            "total_cost_usd": total_cost,
-        }
+            "scenarios": {
+                name: {
+                    "score": r.score,
+                    "success": r.success,
+                    "tool_calls": r.tool_calls,
+                    "cost_usd": r.cost_usd,
+                    "token_usage": r.token_usage,
+                    "model_usage": r.model_usage,
+                    "rubric": r.rubric,
+                    "error": r.error,
+                    "response": r.response,
+                }
+                for name, r in results.items()
+            },
+            "summary": {
+                "avg_score": avg_score,
+                "passed": num_passed,
+                "total": len(results),
+                "fully_qualified": all_passed,
+                "total_cost_usd": total_cost,
+            },
+        })
+
+    # --- 7. Optional JSON output ---
+    if args.output:
+        # Single miner: keep original flat format for backwards compatibility
+        if len(all_output_data) == 1:
+            output = all_output_data[0]
+        else:
+            output = {"miners": all_output_data}
         with open(args.output, "w") as f:
-            json.dump(output_data, f, indent=2, ensure_ascii=False)
+            json.dump(output, f, indent=2, ensure_ascii=False)
         print(f"\nFull results written to: {args.output}")
 
-    return 0 if all_passed else 1
+    return 1 if any_failure else 0
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate a single miner by UID using on-chain commitment data. "
+        description="Evaluate one or more miners by UID using on-chain commitment data. "
                     "Read-only: no weight setting, no EMA persistence, no on-chain writes.",
     )
 
     parser.add_argument(
-        "--miner-uid", type=int, required=True,
-        help="Miner UID to evaluate",
+        "--miner-uid", type=int, nargs="+", required=True,
+        help="Miner UID(s) to evaluate (space-separated)",
     )
 
     # Network config
