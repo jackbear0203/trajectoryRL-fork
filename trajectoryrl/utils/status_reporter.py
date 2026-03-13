@@ -5,6 +5,7 @@ dashboard can track online nodes.
 """
 
 import logging
+import os
 import time
 from typing import Any, Dict, Optional
 
@@ -14,9 +15,10 @@ from trajectoryrl import __version__
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REPORT_URL = "https://trajrl.com/api/nodes/report"
-DEFAULT_HEARTBEAT_URL = "https://trajrl.com/api/validators/heartbeat"
-DEFAULT_SUBMIT_URL = "https://trajrl.com/api/scores/submit"
+_BASE_URL = os.getenv("TRAJECTORYRL_API_BASE_URL", "https://trajrl.com")
+DEFAULT_REPORT_URL = f"{_BASE_URL}/api/nodes/report"
+DEFAULT_HEARTBEAT_URL = f"{_BASE_URL}/api/validators/heartbeat"
+DEFAULT_SUBMIT_URL = f"{_BASE_URL}/api/scores/submit"
 
 
 async def report_status(
