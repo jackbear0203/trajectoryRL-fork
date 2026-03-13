@@ -597,6 +597,7 @@ class TrajectoryValidator:
             eval_result = await self._evaluate_miner(
                 uid, commitment, eval_scenarios, epoch_seed,
                 context_preamble, user_context,
+                block_height=current_block,
             )
 
             if eval_result is not None:
@@ -814,6 +815,7 @@ class TrajectoryValidator:
         epoch_seed: int,
         context_preamble: str = "",
         user_context: Optional[Dict] = None,
+        block_height: int = 0,
     ) -> Optional[Dict]:
         """Evaluate a single miner on all scenarios.
 
@@ -869,6 +871,27 @@ class TrajectoryValidator:
                 logger.warning(
                     f"  Flag: {flag.type} ({flag.severity}): {flag.explanation}"
                 )
+            asyncio.ensure_future(
+                submit_eval(
+                    self.wallet,
+                    miner_hotkey=commitment.hotkey,
+                    miner_uid=miner_uid,
+                    block_height=block_height,
+                    score=0.0,
+                    ema_score=0.0,
+                    cost=0.0,
+                    ema_cost=0.0,
+                    weight=0.0,
+                    qualified=False,
+                    pack_url=commitment.pack_url,
+                    pack_hash=commitment.pack_hash,
+                    llm_base_url=self._judge_base_url,
+                    llm_model=self._judge_model,
+                    rejected=True,
+                    rejection_stage="integrity_check",
+                    rejection_detail=integrity.summary,
+                )
+            )
             return None
 
         if integrity.flags:

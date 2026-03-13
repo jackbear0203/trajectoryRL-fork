@@ -153,6 +153,9 @@ async def submit_eval(
     scenario_results: Optional[Dict[str, Any]] = None,
     llm_base_url: Optional[str] = None,
     llm_model: Optional[str] = None,
+    rejected: Optional[bool] = None,
+    rejection_stage: Optional[str] = None,
+    rejection_detail: Optional[str] = None,
     submit_url: str = DEFAULT_SUBMIT_URL,
 ) -> bool:
     """Submit a single miner eval result to the dashboard API.
@@ -182,6 +185,7 @@ async def submit_eval(
         "block_height": block_height,
         "timestamp": timestamp,
         "signature": signature,
+        "version": __version__,
         "score": score,
         "ema_score": ema_score,
         "cost": cost,
@@ -203,6 +207,12 @@ async def submit_eval(
         payload["llm_base_url"] = llm_base_url
     if llm_model is not None:
         payload["llm_model"] = llm_model
+    if rejected is not None:
+        payload["rejected"] = rejected
+    if rejection_stage is not None:
+        payload["rejection_stage"] = rejection_stage
+    if rejection_detail is not None:
+        payload["rejection_detail"] = rejection_detail
 
     try:
         async with httpx.AsyncClient() as client:
