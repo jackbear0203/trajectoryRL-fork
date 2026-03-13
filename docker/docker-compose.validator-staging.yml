@@ -27,9 +27,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-volumes:
-  trajectoryrl_data_staging:
-
   watchtower:
     image: containrrr/watchtower:latest
     container_name: trajectoryrl_watchtower_staging
@@ -47,3 +44,6 @@ volumes:
       options:
         max-size: "5m"
         max-file: "2"
+
+volumes:
+  trajectoryrl_data_staging:
