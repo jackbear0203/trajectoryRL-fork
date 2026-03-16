@@ -124,6 +124,12 @@ class ValidatorConfig:
     )
     pack_cache_max_size: int = 100  # MB
 
+    # Parallel evaluation
+    parallel_scenarios: bool = False  # Enable parallel scenario evaluation
+    openclaw_bin: Path = field(
+        default_factory=lambda: Path("/app/openclaw")
+    )
+
     # Logging
     log_level: str = "INFO"
     log_dir: Path = field(
@@ -189,6 +195,8 @@ class ValidatorConfig:
             judge_api_key=os.getenv("JUDGE_API_KEY", ""),
             judge_base_url=os.getenv("JUDGE_BASE_URL", ""),
             # --- Operational ---
+            parallel_scenarios=os.getenv("PARALLEL_SCENARIOS", "0") == "1",
+            openclaw_bin=Path(os.getenv("OPENCLAW_BIN", "/app/openclaw")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             # --- IM parameters are hardcoded (dataclass defaults) ---
             # Do NOT load from env: ema_alpha, cost_ema_alpha, cost_delta,
