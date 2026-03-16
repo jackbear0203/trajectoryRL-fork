@@ -51,6 +51,10 @@ EVAL_START_BLOCK = 0
 # Shadow mode runs real evals and logs results, but always sets weights to owner UID 74.
 SHADOW_MODE = False
 
+_EVAL_CACHE_MAX_RETRIES = int(os.getenv("TRAJECTORYRL_CACHE_MAX_RETRIES", "3"))
+_EVAL_CACHE_TTL_DAYS = int(os.getenv("TRAJECTORYRL_CACHE_TTL_DAYS", "14"))
+_EVAL_CACHE_ENABLED = os.getenv("TRAJECTORYRL_EVAL_CACHE_ENABLED", "1") != "0"
+
 
 class TrajectoryValidator:
     """TrajectoryRL validator that evaluates policy packs using ClawBench.
@@ -190,6 +194,12 @@ class TrajectoryValidator:
         # Load persisted EMA state
         self._load_ema_state()
 
+        # Eval result cache: pack_hash -> {status, result, failure_count, ...}
+        # Keyed by miner-submitted pack_hash; avoids re-running ClawBench + LLM
+        # judge for packs that have already been evaluated this cycle.
+        self._eval_cache: Dict[str, dict] = {}
+        self._load_eval_cache()
+
         logger.info("Validator initialization complete!")
 
     # ------------------------------------------------------------------
@@ -256,6 +266,124 @@ class TrajectoryValidator:
             )
         except Exception as e:
             logger.warning(f"Failed to save EMA state: {e}")
+
+    # ------------------------------------------------------------------
+    # Eval result cache
+    # ------------------------------------------------------------------
+
+    @property
+    def _eval_cache_path(self) -> Path:
+        return self.config.ema_state_path.parent / "eval_cache.json"
+
+    def _load_eval_cache(self):
+        """Load eval result cache from disk, pruning expired entries."""
+        if not _EVAL_CACHE_ENABLED:
+            return
+        path = self._eval_cache_path
+        if not path.exists():
+            logger.info("No eval cache found, starting fresh")
+            return
+        try:
+            data = json.loads(path.read_text())
+            cutoff = time.time() - _EVAL_CACHE_TTL_DAYS * 86400
+            self._eval_cache = {
+                k: v for k, v in data.items()
+                if v.get("last_eval_at", 0) > cutoff
+            }
+            pruned = len(data) - len(self._eval_cache)
+            logger.info(
+                f"Loaded eval cache: {len(self._eval_cache)} entries"
+                + (f" (pruned {pruned} expired)" if pruned else "")
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load eval cache: {e}")
+
+    def _save_eval_cache(self):
+        """Persist eval result cache to disk."""
+        if not _EVAL_CACHE_ENABLED:
+            return
+        try:
+            self._eval_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._eval_cache_path.write_text(
+                json.dumps(self._eval_cache, indent=2, sort_keys=True)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save eval cache: {e}")
+
+    def _check_eval_cache(self, pack_hash: str) -> Tuple[bool, Optional[Dict]]:
+        """Check whether a cached eval result can be reused for pack_hash.
+
+        Returns:
+            (should_use_cache, cached_result)
+            - (True, result_dict)  success hit — use result directly
+            - (True, None)         failed hit, max retries reached — treat as None
+            - (False, None)        no usable cache — run full evaluation
+        """
+        if not _EVAL_CACHE_ENABLED:
+            return False, None
+
+        entry = self._eval_cache.get(pack_hash)
+        if entry is None:
+            logger.debug(f"[EVAL_CACHE] MISS pack_hash={pack_hash[:12]}")
+            return False, None
+
+        if entry["status"] == "success":
+            logger.info(f"[EVAL_CACHE] HIT  pack_hash={pack_hash[:12]} status=success")
+            return True, entry["result"]
+
+        # status == "failed"
+        failure_count = entry.get("failure_count", 1)
+        if failure_count >= _EVAL_CACHE_MAX_RETRIES:
+            logger.info(
+                f"[EVAL_CACHE] SKIP pack_hash={pack_hash[:12]} status=failed "
+                f"failure_count={failure_count}/{_EVAL_CACHE_MAX_RETRIES} "
+                f"(max retries reached)"
+            )
+            return True, None
+
+        logger.info(
+            f"[EVAL_CACHE] HIT  pack_hash={pack_hash[:12]} status=failed "
+            f"failure_count={failure_count}/{_EVAL_CACHE_MAX_RETRIES} (retrying)"
+        )
+        return False, None
+
+    def _update_eval_cache(
+        self,
+        pack_hash: str,
+        eval_result: Optional[Dict],
+        failure_reason: Optional[str] = None,
+    ):
+        """Write or update the eval cache entry for pack_hash.
+
+        On success, stores the full result dict and resets failure_count.
+        On failure, increments failure_count (capped behaviour handled by
+        _check_eval_cache on the next call).
+        """
+        if not _EVAL_CACHE_ENABLED:
+            return
+        now = time.time()
+        existing = self._eval_cache.get(pack_hash)
+        first_eval_at = existing["first_eval_at"] if existing else now
+
+        if eval_result is not None:
+            self._eval_cache[pack_hash] = {
+                "status": "success",
+                "result": eval_result,
+                "failure_count": 0,
+                "first_eval_at": first_eval_at,
+                "last_eval_at": now,
+                "failure_reason": None,
+            }
+        else:
+            prev_count = existing.get("failure_count", 0) if existing else 0
+            self._eval_cache[pack_hash] = {
+                "status": "failed",
+                "result": None,
+                "failure_count": prev_count + 1,
+                "first_eval_at": first_eval_at,
+                "last_eval_at": now,
+                "failure_reason": failure_reason,
+            }
 
     # ------------------------------------------------------------------
     # EMA update
@@ -461,6 +589,7 @@ class TrajectoryValidator:
                         self.config.pack_cache_max_size
                     )
                     self._save_ema_state()
+                    self._save_eval_cache()
 
                 # --- Tempo cadence: re-set weights ---
                 current_block = self.subtensor.get_current_block()
@@ -478,6 +607,7 @@ class TrajectoryValidator:
             except KeyboardInterrupt:
                 logger.info("Received interrupt, shutting down...")
                 self._save_ema_state()
+                self._save_eval_cache()
                 break
             except Exception as e:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
@@ -725,16 +855,33 @@ class TrajectoryValidator:
                     )
                     continue
 
-            attempted_count += 1
-            logger.info(
-                f"[{miner_idx}/{total_eligible}] Evaluating miner {uid} "
-                f"({hotkey[:8]}) ..."
-            )
-            eval_result = await self._evaluate_miner(
-                uid, commitment, eval_scenarios, epoch_seed,
-                context_preamble, user_context,
-                block_height=current_block,
-            )
+            # Check eval cache before spending LLM tokens.
+            # Pre-eval always runs; cache is keyed by pack_hash.
+            cache_hit, cache_result = self._check_eval_cache(commitment.pack_hash)
+            if cache_hit:
+                eval_result = cache_result
+                if cache_result is not None:
+                    logger.info(
+                        f"[{miner_idx}/{total_eligible}] Miner {uid} ({hotkey[:8]}): "
+                        f"using cached eval result (pack_hash={commitment.pack_hash[:12]})"
+                    )
+                else:
+                    logger.info(
+                        f"[{miner_idx}/{total_eligible}] Miner {uid} ({hotkey[:8]}): "
+                        f"cached failure — max retries reached, skipping eval"
+                    )
+            else:
+                attempted_count += 1
+                logger.info(
+                    f"[{miner_idx}/{total_eligible}] Evaluating miner {uid} "
+                    f"({hotkey[:8]}) ..."
+                )
+                eval_result = await self._evaluate_miner(
+                    uid, commitment, eval_scenarios, epoch_seed,
+                    context_preamble, user_context,
+                    block_height=current_block,
+                )
+                self._update_eval_cache(commitment.pack_hash, eval_result)
 
             if eval_result is not None:
                 ema_reset = self._ema_pack_hash.get(hotkey) != commitment.pack_hash

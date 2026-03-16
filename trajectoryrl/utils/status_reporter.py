@@ -100,7 +100,9 @@ async def pre_eval(
         async with httpx.AsyncClient() as client:
             resp = await client.get(pre_eval_url, params=params, timeout=10)
         if resp.status_code == 200:
-            return resp.json()
+            data = resp.json()
+            logger.info("Pre-eval check passed: %s", data)
+            return data
         logger.warning(
             "Pre-eval check failed: %d %s", resp.status_code, resp.text[:200]
         )
