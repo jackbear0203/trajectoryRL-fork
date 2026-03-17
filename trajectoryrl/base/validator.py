@@ -888,6 +888,11 @@ class TrajectoryValidator:
                             rejection_detail=_detail,
                         )
                     )
+                    # Clear stale EMA state so rejected miners cannot
+                    # retain weight from a previous successful evaluation.
+                    self.ema_costs.pop(hotkey, None)
+                    self.scenario_qualified.pop(hotkey, None)
+                    self._ema_pack_hash.pop(hotkey, None)
                     continue
 
             # Check eval cache before spending LLM tokens.
