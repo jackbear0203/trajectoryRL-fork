@@ -850,6 +850,7 @@ class TrajectoryValidator:
                     hotkey,
                     commitment.pack_hash,
                     commitment.pack_url,
+                    wallet=self.wallet,
                 )
                 if pre_eval_result is not None and not pre_eval_result.get("allowed", True):
                     rejected_pre_eval_count += 1

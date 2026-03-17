@@ -87,6 +87,7 @@ async def pre_eval(
     pack_hash: str,
     pack_url: Optional[str] = None,
     *,
+    wallet=None,
     pre_eval_url: str = DEFAULT_PRE_EVAL_URL,
 ) -> Optional[Dict[str, Any]]:
     """Call the pre-eval API to check whether a miner's submission is allowed.
@@ -99,6 +100,7 @@ async def pre_eval(
         miner_hotkey: Miner hotkey to check.
         pack_hash: Pack hash submitted by the miner.
         pack_url: Pack download URL (required by the server if this hash is new).
+        wallet: bt.Wallet with accessible hotkey for signing.
         pre_eval_url: Pre-eval API endpoint.
 
     Returns:
@@ -106,13 +108,36 @@ async def pre_eval(
         request failed AND no cached result exists (fail-open).
     """
     cache_key = (miner_hotkey, pack_hash)
-    params: Dict[str, Any] = {"hotkey": miner_hotkey, "hash": pack_hash}
+
+    if wallet is None:
+        logger.warning("pre_eval called without wallet — failing open")
+        return None
+
+    try:
+        hotkey_kp = wallet.hotkey
+    except Exception:
+        logger.warning("pre_eval: wallet hotkey not available — failing open")
+        return None
+
+    validator_hotkey = hotkey_kp.ss58_address
+    timestamp = int(time.time())
+    message = f"trajectoryrl-report:{validator_hotkey}:{timestamp}"
+    sig = hotkey_kp.sign(message.encode())
+    signature = "0x" + (sig if isinstance(sig, bytes) else bytes(sig)).hex()
+
+    payload: Dict[str, Any] = {
+        "validator_hotkey": validator_hotkey,
+        "timestamp": timestamp,
+        "signature": signature,
+        "miner_hotkey": miner_hotkey,
+        "pack_hash": pack_hash,
+    }
     if pack_url is not None:
-        params["pack_url"] = pack_url
+        payload["pack_url"] = pack_url
 
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(pre_eval_url, params=params, timeout=10)
+            resp = await client.post(pre_eval_url, json=payload, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             if _is_valid_pre_eval_response(data):
