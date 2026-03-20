@@ -24,7 +24,9 @@ from .llm_client import generate
 logger = logging.getLogger(__name__)
 
 # Maximum characters of tool response to include in judge context.
-# Prevents context overflow from large fixture dumps.
+# 4000 balances grounding visibility vs token cost. Scenarios like
+# team_standup have 25 Slack messages (~8K chars) — 2000 cut off
+# incident details and caused false "ungrounded" failures.
 MAX_TOOL_RESPONSE_CHARS = 4000
 
 # Maximum characters for the full trajectory section.
@@ -161,6 +163,7 @@ class PackIntegrityJudge:
                 max_tokens=self.max_tokens,
                 api_key=self.api_key,
                 base_url=self.base_url,
+                temperature=0,
             )
 
             return self._parse_integrity_output(raw)
@@ -334,6 +337,7 @@ class TrajectoryJudge:
                 max_tokens=self.max_tokens,
                 api_key=self.api_key,
                 base_url=self.base_url,
+                temperature=0,
             )
 
             return self._parse_judge_output(raw, criteria)
@@ -380,8 +384,152 @@ class TrajectoryJudge:
             formatted_criteria=formatted_criteria,
         )
 
+    # ------------------------------------------------------------------
+    # Trajectory formatting helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _clean_response(tool: str, args: dict, response) -> Any:
+        """Strip wrapper metadata and parse double-serialized JSON.
+
+        Returns the cleaned data (dict, list, or str).
+        """
+        if not isinstance(response, dict):
+            return response
+
+        if tool == "exec":
+            # {status, exitCode, durationMs, aggregated} → just aggregated
+            raw = response.get("aggregated", "")
+            if isinstance(raw, str):
+                try:
+                    return json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    return raw
+            return raw
+
+        if tool == "slack":
+            # {ok, messages} → just messages
+            if "messages" in response:
+                return response["messages"]
+            return response
+
+        if tool in ("web_search", "memory_search"):
+            # Strip provider/tookMs/cached noise, keep results
+            if "results" in response:
+                return response["results"]
+            return response
+
+        if tool == "read":
+            # {path, content} → just content
+            return response.get("content", response)
+
+        return response
+
+    @staticmethod
+    def _format_args_md(tool: str, args: dict) -> str:
+        """Format tool args as concise text."""
+        if tool == "exec":
+            return args.get("command", str(args))
+        if tool == "slack":
+            return args.get("action", str(args))
+        if tool == "read":
+            return args.get("path", str(args))
+        if tool in ("memory_search", "web_search"):
+            return args.get("query", str(args))
+        if tool == "web_fetch":
+            return args.get("url", str(args))
+        if tool == "memory_get":
+            return args.get("key", str(args))
+        return json.dumps(args, default=str, ensure_ascii=False)
+
+    @staticmethod
+    def _format_response_md(tool: str, args: dict, data) -> str:
+        """Format cleaned response data as readable Markdown."""
+        if isinstance(data, str):
+            return data if data else "(empty)"
+
+        if not isinstance(data, (dict, list)):
+            return str(data)
+
+        cmd = args.get("command", "") if isinstance(args, dict) else ""
+
+        # -- exec: calendar items --
+        if tool == "exec" and isinstance(data, dict) and "items" in data:
+            items = data["items"]
+            lines = []
+            for item in items:
+                title = item.get("title", "")
+                start = item.get("start", "")
+                notes = item.get("notes", "")
+                loc = item.get("location", "")
+                parts = [f"**{title}**", start]
+                if loc:
+                    parts.append(loc)
+                if notes:
+                    parts.append(f'"{notes}"')
+                lines.append("- " + " | ".join(parts))
+            return "\n".join(lines) if lines else "(empty)"
+
+        # -- exec: notion/sprint tasks --
+        if tool == "exec" and isinstance(data, dict) and "results" in data:
+            tasks = data["results"]
+            lines = []
+            for t in tasks:
+                tid = t.get("id", "?")
+                title = t.get("title", "")
+                status = t.get("status", "")
+                pri = t.get("priority", "")
+                assignee = t.get("assignee", "")
+                notes = t.get("notes", "")
+                parts = [f"**{tid}** {title}", status, pri, assignee]
+                if notes:
+                    parts.append(f'"{notes}"')
+                lines.append("- " + " | ".join(parts))
+            return "\n".join(lines) if lines else "(empty)"
+
+        # -- slack messages: group by channel --
+        if tool == "slack" and isinstance(data, list) and data and "channel" in data[0]:
+            from collections import defaultdict
+            by_channel = defaultdict(list)
+            for msg in data:
+                ch = msg.get("channel", "?")
+                by_channel[ch].append(msg)
+            parts = []
+            for ch in sorted(by_channel):
+                parts.append(f"**{ch}:**")
+                for msg in by_channel[ch]:
+                    author = msg.get("author", "?")
+                    ts = msg.get("timestamp", "")
+                    # Shorten timestamp: "2026-02-05T17:45:00-08:00" → "Feb 5 5:45pm"
+                    short_ts = ts
+                    if "T" in ts:
+                        try:
+                            from datetime import datetime as _dt
+                            dt = _dt.fromisoformat(ts)
+                            short_ts = dt.strftime("%b %-d %-I:%M%p").lower()
+                        except Exception:
+                            pass
+                    text = msg.get("text", "")
+                    parts.append(f"- {author} ({short_ts}): {text}")
+            return "\n".join(parts)
+
+        # -- web_search / memory_search results --
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            lines = []
+            for item in data:
+                parts = []
+                for k, v in item.items():
+                    if k in ("provider", "tookMs", "cached"):
+                        continue
+                    parts.append(f"{k}={v}")
+                lines.append("- " + " | ".join(parts))
+            return "\n".join(lines) if lines else "(empty)"
+
+        # -- fallback: compact JSON --
+        return json.dumps(data, default=str, ensure_ascii=False)
+
     def _format_trajectory(self, trajectory: List[dict]) -> str:
-        """Format tool calls for judge consumption."""
+        """Format tool calls as Markdown for judge consumption."""
         if not trajectory:
             return "(No tool calls were made. The agent produced a response without using any tools.)"
 
@@ -391,24 +539,24 @@ class TrajectoryJudge:
             args = tc.get("args", {})
             response = tc.get("response", "")
 
-            # Format args
-            if isinstance(args, dict):
-                args_str = json.dumps(args, default=str, ensure_ascii=False)
-            else:
-                args_str = str(args)
+            args_str = self._format_args_md(tool, args if isinstance(args, dict) else {})
+            cleaned = self._clean_response(tool, args if isinstance(args, dict) else {}, response)
+            resp_str = self._format_response_md(tool, args if isinstance(args, dict) else {}, cleaned)
 
-            # Truncate long responses
-            if isinstance(response, dict):
-                resp_str = json.dumps(response, default=str, ensure_ascii=False)
-            else:
-                resp_str = str(response)
+            # Safety net: truncate if still too long after MD formatting
             if len(resp_str) > MAX_TOOL_RESPONSE_CHARS:
-                resp_str = resp_str[:MAX_TOOL_RESPONSE_CHARS] + f"... [truncated, {len(resp_str)} total chars]"
+                head_size = MAX_TOOL_RESPONSE_CHARS * 2 // 3
+                tail_size = MAX_TOOL_RESPONSE_CHARS - head_size
+                resp_str = (
+                    resp_str[:head_size]
+                    + f"\n... [truncated {len(resp_str) - head_size - tail_size} chars] ...\n"
+                    + resp_str[-tail_size:]
+                )
 
             parts.append(
                 f"### Call {i}: {tool}\n"
-                f"Args: {args_str}\n"
-                f"Response: {resp_str}\n"
+                f"**{args_str}**\n"
+                f"{resp_str}\n"
             )
 
         full = "\n".join(parts)

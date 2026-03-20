@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import sys
 import shutil
 import subprocess
 import yaml
@@ -407,6 +408,13 @@ class ClawBenchHarness:
                     child.unlink()
         else:
             workspace.mkdir(parents=True, exist_ok=True)
+        # OpenClaw may run as a non-root user in Docker. Ensure the workspace
+        # is at least world-readable/traversable so the container can read pack
+        # files without making miner-supplied content world-writable.
+        try:
+            workspace.chmod(0o755)
+        except OSError:
+            logger.debug(f"Could not chmod workspace dir: {workspace}")
         workspace_abs = workspace.resolve()
 
         # Write files from pack.
@@ -427,6 +435,13 @@ class ClawBenchHarness:
                 continue
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content)
+            # Ensure generated paths are readable by a non-root container user
+            # without making miner-supplied content world-writable.
+            try:
+                file_path.parent.chmod(0o755)
+                file_path.chmod(0o644)
+            except OSError:
+                logger.debug(f"Could not chmod generated file: {file_path}")
             logger.debug(f"Wrote {filename} ({len(content)} chars)")
 
         logger.info(f"Applied pack to workspace: {workspace}")
@@ -463,7 +478,7 @@ class ClawBenchHarness:
             raise ValueError(f"run_episode.py not found: {run_script}")
 
         cmd = [
-            "python",
+            sys.executable,
             str(run_script),
             "--scenario", scenario_name,
             "--workspace", str(workspace),

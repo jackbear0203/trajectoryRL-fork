@@ -47,6 +47,7 @@ def generate(
     max_tokens: int = 8192,
     api_key: str = "",
     base_url: str = "",
+    temperature: Optional[float] = None,
 ) -> str:
     """Generate text using an OpenAI-compatible LLM endpoint.
 
@@ -57,6 +58,7 @@ def generate(
         max_tokens: Maximum tokens in the response.
         api_key: Explicit API key (overrides ``LLM_API_KEY`` env var).
         base_url: Explicit base URL (overrides ``LLM_BASE_URL`` env var).
+        temperature: Sampling temperature. Use 0 for deterministic output.
 
     Returns:
         Generated text content.
@@ -72,7 +74,7 @@ def generate(
     url = base_url or os.environ.get("CLAWBENCH_LLM_BASE_URL", DEFAULT_BASE_URL)
     logger.info("LLM generate: model=%s, base_url=%s", model, url)
 
-    return _generate_openai_compat(model, system, user_message, max_tokens, key, url)
+    return _generate_openai_compat(model, system, user_message, max_tokens, key, url, temperature=temperature)
 
 
 def _generate_openai_compat(
@@ -82,6 +84,7 @@ def _generate_openai_compat(
     max_tokens: int,
     api_key: str,
     base_url: Optional[str] = None,
+    temperature: Optional[float] = None,
 ) -> str:
     from openai import OpenAI
 
@@ -93,7 +96,7 @@ def _generate_openai_compat(
     current_max_tokens = max_tokens
 
     for attempt in range(1 + MAX_REASONING_RETRIES):
-        response = client.chat.completions.create(
+        create_kwargs = dict(
             model=model,
             max_tokens=current_max_tokens,
             messages=[
@@ -101,6 +104,10 @@ def _generate_openai_compat(
                 {"role": "user", "content": user_message},
             ],
         )
+        if temperature is not None:
+            create_kwargs["temperature"] = temperature
+
+        response = client.chat.completions.create(**create_kwargs)
 
         choice = response.choices[0]
         message = choice.message
