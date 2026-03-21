@@ -1211,6 +1211,83 @@ class TrajectoryValidator:
             )
 
     # ------------------------------------------------------------------
+    # Episode detail logging (file-only, no console output)
+    # ------------------------------------------------------------------
+
+    def _log_episode_details(
+        self,
+        mlog: logging.Logger,
+        scenario_name: str,
+        result: "EvaluationResult",
+    ) -> None:
+        """Log detailed OpenClaw and mock_tool request/response to the
+        per-miner file logger.  The miner logger has ``propagate=False``
+        and only a FileHandler, so this does NOT appear in docker logs."""
+        mlog.info(
+            f"--- {scenario_name} episode detail ---"
+        )
+
+        # -- OpenClaw request --
+        if result.input_message:
+            mlog.info(
+                f"[openclaw-request] message={result.input_message}"
+            )
+
+        # -- OpenClaw response --
+        if result.raw_llm_response:
+            resp = result.raw_llm_response
+            if "error" in resp:
+                mlog.info(f"[openclaw-response] error={resp['error']}")
+            else:
+                model = resp.get("model", "?")
+                finish = "?"
+                choices = resp.get("choices") or []
+                if choices:
+                    finish = choices[0].get("finish_reason", "?")
+                mlog.info(
+                    f"[openclaw-response] model={model} finish_reason={finish}"
+                )
+                if choices:
+                    msg = choices[0].get("message", {})
+                    content = msg.get("content", "")
+                    mlog.info(
+                        f"[openclaw-response] content={content}"
+                    )
+
+        # -- mock_tool calls (from trajectory) --
+        trajectory = result.trajectory or []
+        if trajectory:
+            mlog.info(
+                f"[mock-tools] {len(trajectory)} tool call(s):"
+            )
+            for idx, tc in enumerate(trajectory, 1):
+                tool = tc.get("tool", "?")
+                args = tc.get("args", {})
+                resp = tc.get("response", {})
+                mlog.info(
+                    f"  [{idx}] tool={tool} "
+                    f"args={json.dumps(args, ensure_ascii=False, default=str)}"
+                )
+                mlog.info(
+                    f"  [{idx}] response="
+                    f"{json.dumps(resp, ensure_ascii=False, default=str)}"
+                )
+
+        # -- failed requests (from all_requests) --
+        all_reqs = result.all_requests or []
+        failed = [r for r in all_reqs if not r.get("success")]
+        if failed:
+            mlog.info(f"[mock-tools] {len(failed)} failed request(s):")
+            for idx, fr in enumerate(failed, 1):
+                mlog.info(
+                    f"  [FAIL-{idx}] tool={fr.get('tool', '?')} "
+                    f"status={fr.get('status_code', '?')} "
+                    f"body={json.dumps(fr.get('body'), ensure_ascii=False, default=str)}"
+                )
+
+        mlog.info(f"--- end {scenario_name} episode detail ---")
+
+    # ------------------------------------------------------------------
     # Miner evaluation
     # ------------------------------------------------------------------
 
@@ -1345,6 +1422,8 @@ class TrajectoryValidator:
                         for s in remaining:
                             scenario_qualified[s] = False
                     break
+
+                self._log_episode_details(mlog, scenario_name, result)
 
                 if result.cost_usd is not None:
                     scenario_costs[scenario_name] = result.cost_usd
@@ -1531,6 +1610,52 @@ class TrajectoryValidator:
                 entry["judge"] = jd
             scenario_results[sname] = entry
 
+        # Log the full eval summary to the per-miner file for debugging.
+        mlog = self._get_miner_logger(hotkey)
+        fully_qualified = self.is_fully_qualified(hotkey)
+        total_ema_cost = self.compute_total_cost_from_ema(hotkey) or 0.0
+        mlog.info(
+            f"=== eval summary (uid={uid}, eval#{eval_count}) ==="
+        )
+        mlog.info(
+            f"  score={raw_score:.4f} cost=${raw_cost:.4f} "
+            f"ema_cost=${total_ema_cost:.4f} qualified={fully_qualified} "
+            f"ema_reset={ema_reset}"
+        )
+        mlog.info(
+            f"  pack_url={commitment.pack_url} "
+            f"pack_hash={commitment.pack_hash}"
+        )
+        for sname, sr in scenario_results.items():
+            jd = sr.get("judge", {})
+            mlog.info(
+                f"  {sname}: qualified={sr.get('qualified')} "
+                f"cost=${sr.get('cost', 0):.4f} "
+                f"ema_cost=${sr.get('ema_cost', 0):.4f} "
+                f"judge_score={jd.get('overall_score', '?')} "
+                f"verdict={jd.get('verdict', '?')} "
+                f"grounded={jd.get('grounded', '?')} "
+                f"safety={jd.get('safety_passed', '?')} "
+                f"correctness={jd.get('correctness_passed', '?')}"
+            )
+            tu = sr.get("token_usage")
+            if tu:
+                mlog.info(
+                    f"    tokens: in={tu.get('input_tokens', 0)} "
+                    f"out={tu.get('output_tokens', 0)} "
+                    f"cache_r={tu.get('cache_read_tokens', 0)} "
+                    f"cache_w={tu.get('cache_write_tokens', 0)}"
+                )
+            mu = sr.get("model_usage")
+            if mu:
+                for m in mu:
+                    mlog.info(
+                        f"    model={m.get('model', '?')} "
+                        f"cost=${m.get('cost_usd', 0):.4f} "
+                        f"calls={m.get('count', 0)}"
+                    )
+        mlog.info("=== end eval summary ===")
+
         await submit_eval(
             self.wallet,
             miner_hotkey=hotkey,
@@ -1539,9 +1664,9 @@ class TrajectoryValidator:
             score=round(raw_score, 4),
             ema_score=round(raw_score, 4),
             cost=round(raw_cost, 4),
-            ema_cost=round(self.compute_total_cost_from_ema(hotkey) or 0.0, 4),
+            ema_cost=round(total_ema_cost, 4),
             weight=0.0,
-            qualified=self.is_fully_qualified(hotkey),
+            qualified=fully_qualified,
             pack_url=commitment.pack_url,
             pack_hash=commitment.pack_hash,
             eval_count=eval_count,

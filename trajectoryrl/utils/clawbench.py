@@ -31,6 +31,9 @@ class EvaluationResult:
         cost_usd: Total episode cost in USD (None if unavailable)
         token_usage: Token breakdown {input, output, cache_read, cache_write}
         model_usage: Per-model cost breakdown for multi-model routing (None if single model)
+        input_message: User message sent to OpenClaw
+        raw_llm_response: Full OpenClaw API response dict
+        all_requests: All mock_tool requests including failures
     """
     scenario_name: str
     score: float
@@ -43,6 +46,9 @@ class EvaluationResult:
     token_usage: Optional[Dict[str, int]] = None
     model_usage: Optional[List[Dict[str, Any]]] = None
     trajectory: Optional[List[Dict[str, Any]]] = None
+    input_message: Optional[str] = None
+    raw_llm_response: Optional[Dict[str, Any]] = None
+    all_requests: Optional[List[Dict[str, Any]]] = None
 
 
 class ClawBenchHarness:
@@ -568,6 +574,10 @@ class ClawBenchHarness:
                 if models and isinstance(models, list):
                     model_usage = models
 
+            input_message = result_data.get("input_message")
+            raw_llm_response = result_data.get("openclaw_raw_response")
+            all_requests = result_data.get("all_requests")
+
             logger.info(
                 f"Evaluation result for {scenario_name}: "
                 f"score={score}, success={success}, tool_calls={tool_calls}, "
@@ -585,6 +595,9 @@ class ClawBenchHarness:
                 token_usage=token_usage,
                 model_usage=model_usage,
                 trajectory=trajectory,
+                input_message=input_message,
+                raw_llm_response=raw_llm_response,
+                all_requests=all_requests,
             )
 
         except asyncio.TimeoutError:
