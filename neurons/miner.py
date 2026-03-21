@@ -16,15 +16,18 @@ Config is loaded from .env.miner (or environment variables):
     LLM_API_KEY, LLM_MODEL, S3_BUCKET, S3_ENDPOINT_URL, S3_REGION, PACK_URL
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
 import logging
 import sys
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from trajectoryrl.utils.config import MinerConfig
+if TYPE_CHECKING:
+    from trajectoryrl.utils.config import MinerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +309,7 @@ def cmd_validate(args):
 
 
 def cmd_submit(args):
+    from trajectoryrl.utils.config import MinerConfig
     config = MinerConfig.from_env()
     miner = _make_miner(config)
     pack = _fetch_pack(args.pack_url)
@@ -325,6 +329,7 @@ def cmd_submit(args):
 
 def cmd_status(args):
     from trajectoryrl.utils.commitments import parse_commitment
+    from trajectoryrl.utils.config import MinerConfig
 
     config = MinerConfig.from_env()
     miner = _make_miner(config)
@@ -345,6 +350,7 @@ def cmd_status(args):
 
 
 def cmd_run(args):
+    from trajectoryrl.utils.config import MinerConfig
     config = MinerConfig.from_env()
     if args.interval is not None:
         config.check_interval = args.interval
@@ -401,6 +407,7 @@ def main():
         parser.print_help()
         return 0
 
+    from trajectoryrl.utils.config import MinerConfig
     config = MinerConfig.from_env()
     log_level = args.log_level or config.log_level
     logging.basicConfig(

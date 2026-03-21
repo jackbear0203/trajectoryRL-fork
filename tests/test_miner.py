@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -439,6 +440,69 @@ class TestMinerCLI:
 
         result = cli.cmd_validate(args)
         assert result == 1
+
+
+# ===================================================================
+# CLI Help Output (subcommand --help)
+# ===================================================================
+
+
+class TestCLIHelp:
+    """Verify that subcommand --help shows the correct arguments.
+
+    Regression test: bittensor's import side-effects can hijack argparse,
+    causing --help to show bittensor's logging flags instead of the
+    subcommand's own arguments.
+    """
+
+    @staticmethod
+    def _get_help(subcommand: str) -> str:
+        """Capture --help output for a subcommand."""
+        import subprocess
+        cmd = [sys.executable, "-m", "neurons.miner"]
+        if subcommand:
+            cmd.append(subcommand)
+        cmd.append("--help")
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout + result.stderr
+
+    def test_submit_help_shows_pack_url(self):
+        """'miner.py submit --help' must show the pack_url argument."""
+        output = self._get_help("submit")
+        assert "pack_url" in output, (
+            f"submit --help should show 'pack_url' argument, got:\n{output}"
+        )
+
+    def test_build_help_shows_agents_md(self):
+        """'miner.py build --help' must show --agents-md."""
+        output = self._get_help("build")
+        assert "--agents-md" in output, (
+            f"build --help should show '--agents-md', got:\n{output}"
+        )
+
+    def test_run_help_shows_mode(self):
+        """'miner.py run --help' must show --mode."""
+        output = self._get_help("run")
+        assert "--mode" in output, (
+            f"run --help should show '--mode', got:\n{output}"
+        )
+
+    def test_validate_help_shows_pack_path(self):
+        """'miner.py validate --help' must show pack_path."""
+        output = self._get_help("validate")
+        assert "pack_path" in output, (
+            f"validate --help should show 'pack_path', got:\n{output}"
+        )
+
+    def test_top_level_help_shows_subcommands(self):
+        """'miner.py --help' must list all subcommands."""
+        output = self._get_help("")
+        for cmd in ("build", "validate", "submit", "run", "status"):
+            assert cmd in output, (
+                f"top-level --help should list '{cmd}', got:\n{output}"
+            )
 
 
 # ===================================================================
