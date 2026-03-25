@@ -57,7 +57,7 @@ RUN apt-get update && \
 WORKDIR /app
 
 # ── Python dependencies ─────────────────────────────────────────
-COPY pyproject.toml requirements.txt ./
+COPY pyproject.toml requirements.txt VERSION ./
 COPY trajectoryrl/ trajectoryrl/
 COPY neurons/ neurons/
 COPY scripts/ scripts/
