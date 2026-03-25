@@ -6,7 +6,7 @@ Architecture (v4.0 — LLM-as-Judge):
        - tempo (~72 min): compute weights from qualification + cost, set_weights
     2. Read on-chain commitments (subtensor.get_all_commitments)
     3. Fetch packs from miners' public HTTP URLs
-    4. Validate schema + NCD similarity check
+    4. NCD pairwise dedup (before ClawBench); schema validation in _evaluate_miner
     5. Phase 1: LLM pack integrity analysis (static, cached by pack_hash)
     6. Run ALL ClawBench scenarios (single episode per scenario)
     7. Phase 2: LLM trajectory judge per scenario (replaces regex scoring)
@@ -65,12 +65,13 @@ class TrajectoryValidator:
     The validator (v4.0):
     1. Reads on-chain commitments from miners
     2. Fetches and verifies packs from miners' public HTTP URLs
-    3. Phase 1: LLM pack integrity analysis (rejects gaming packs)
-    4. Runs ALL ClawBench scenarios
-    5. Phase 2: LLM trajectory judge per scenario (replaces regex scoring)
-    6. Updates per-scenario cost EMA (keyed by miner hotkey)
-    7. Sets on-chain weights (winner-take-all or bootstrap by cost)
-    8. Re-sets weights every tempo (~72 min) for convergence
+    3. NCD pairwise dedup before ClawBench (copiers rejected like integrity fail)
+    4. Phase 1: LLM pack integrity analysis (rejects gaming packs)
+    5. Runs ALL ClawBench scenarios
+    6. Phase 2: LLM trajectory judge per scenario (replaces regex scoring)
+    7. Updates per-scenario cost EMA (keyed by miner hotkey)
+    8. Sets on-chain weights (winner-take-all or bootstrap by cost)
+    9. Re-sets weights every tempo (~72 min) for convergence
 
     Example:
         >>> config = ValidatorConfig.from_env()
@@ -696,6 +697,58 @@ class TrajectoryValidator:
         """Return True if a ClawBench LLM API key is configured."""
         return bool(self.config.clawbench_api_key)
 
+    async def _prefetch_packs_and_ncd_gate(
+        self,
+        active_commitments: Dict[int, MinerCommitment],
+        skip_uids: set,
+    ) -> Dict[str, str]:
+        """Fetch packs for eligible miners, run NCD dedup, cache packs for eval.
+
+        Miners marked as copiers (values map to originals) must not run ClawBench;
+        they are rejected in the main loop like integrity failures. Non-copiers
+        with a successful fetch get _hotkey_packs / _pack_by_hash populated so
+        _evaluate_miner hits verify_submission cache.
+
+        Miners whose fetch fails are omitted from this NCD round but may still
+        be evaluated later if _evaluate_miner can fetch them.
+        """
+        pack_info: Dict[str, Tuple[dict, int, str]] = {}
+        for uid, commitment in active_commitments.items():
+            if uid in skip_uids:
+                continue
+            hk = commitment.hotkey
+            result = await self.pack_fetcher.verify_submission(
+                commitment.pack_url,
+                commitment.pack_hash,
+            )
+            if not result.valid or result.pack_content is None:
+                logger.warning(
+                    f"NCD prefetch: uid={uid} ({hk[:8]}…): "
+                    f"{result.error or 'unknown'}"
+                )
+                continue
+            pack_info[hk] = (
+                result.pack_content,
+                commitment.block_number,
+                commitment.pack_hash,
+            )
+
+        ncd_excluded = deduplicate_packs(
+            pack_info, self.config.similarity_threshold
+        )
+
+        for hk, (pack, _bn, ph) in pack_info.items():
+            if hk in ncd_excluded:
+                continue
+            self._hotkey_packs[hk] = pack
+            self._pack_by_hash[ph] = pack
+
+        if ncd_excluded:
+            logger.info(
+                f"NCD pre-eval gate: {len(ncd_excluded)} miner(s) flagged as copies"
+            )
+        return ncd_excluded
+
     # ------------------------------------------------------------------
     # Evaluation cycle
     # ------------------------------------------------------------------
@@ -781,7 +834,8 @@ class TrajectoryValidator:
 
         # 5. Pack-hash pre-dedup: for miners with identical pack_hash,
         # only evaluate the first mover (lowest block_number).
-        # Saves LLM API calls. Full NCD dedup happens in weight phase.
+        # Saves LLM API calls. Paraphrase copies are caught by NCD next
+        # (_prefetch_packs_and_ncd_gate); weight phase re-runs NCD as a safety net.
         # Skipped miners will have no entries in scores/costs/qualified
         # and receive weight 0 — this is intentional since their pack is
         # identical to the evaluated first mover.
@@ -823,12 +877,17 @@ class TrajectoryValidator:
         attempted_count = 0
         skipped_interval_count = 0
         rejected_pre_eval_count = 0
+        ncd_rejected_count = 0
         cached_count = 0
         total_eligible = len(active_commitments) - len(skip_uids)
         total_scenarios = len(eval_scenarios)
         logger.info(
             f"=== Eval cycle: {total_eligible} eligible miners, "
             f"{total_scenarios} scenarios each ==="
+        )
+
+        ncd_excluded = await self._prefetch_packs_and_ncd_gate(
+            active_commitments, skip_uids
         )
 
         miner_idx = 0
@@ -839,6 +898,44 @@ class TrajectoryValidator:
                 continue
 
             miner_idx += 1
+
+            if hotkey in ncd_excluded:
+                ncd_rejected_count += 1
+                original_hk = ncd_excluded[hotkey]
+                detail = (
+                    f"NCD: policy too similar to earlier commitment "
+                    f"(original hotkey {original_hk[:8]}…)"
+                )
+                logger.info(
+                    f"[{miner_idx}/{total_eligible}] Miner {uid} ({hotkey[:8]}): "
+                    f"{detail} — skipping eval"
+                )
+                asyncio.ensure_future(
+                    submit_eval(
+                        self.wallet,
+                        miner_hotkey=hotkey,
+                        miner_uid=uid,
+                        block_height=current_block,
+                        score=0.0,
+                        ema_score=0.0,
+                        cost=0.0,
+                        ema_cost=0.0,
+                        weight=0.0,
+                        qualified=False,
+                        pack_url=commitment.pack_url,
+                        pack_hash=commitment.pack_hash,
+                        llm_base_url=self._judge_base_url,
+                        llm_model=self._judge_model,
+                        rejected=True,
+                        rejection_stage="integrity_check",
+                        rejection_detail=detail,
+                    )
+                )
+                self.ema_costs.pop(hotkey, None)
+                self.scenario_qualified.pop(hotkey, None)
+                self._ema_pack_hash.pop(hotkey, None)
+                continue
+
             # Pre-eval gate: ask the server whether this miner's submission
             # is allowed before spending LLM tokens on a full evaluation.
             # Controlled by TRAJECTORYRL_PRE_EVAL_ENABLED (default: 1).
@@ -1014,6 +1111,8 @@ class TrajectoryValidator:
             parts.append(f"{cached_count} cached")
         if rejected_pre_eval_count:
             parts.append(f"{rejected_pre_eval_count} pre-eval rejected")
+        if ncd_rejected_count:
+            parts.append(f"{ncd_rejected_count} NCD rejected")
         if skipped_interval_count:
             parts.append(f"{skipped_interval_count} skipped (interval)")
         failed_count = attempted_count - evaluated_count
@@ -1292,7 +1391,7 @@ class TrajectoryValidator:
         """Evaluate a single miner on all scenarios.
 
         v4.0 flow:
-        1. Fetch + verify pack
+        1. Fetch + verify pack (usually cache hit after cycle NCD prefetch)
         2. Schema validation
         3. Phase 1: LLM integrity check (cached by pack_hash)
         4. Run episodes (single per scenario, no consensus voting)
@@ -1907,43 +2006,6 @@ class TrajectoryValidator:
 
         if not scores:
             logger.warning("All miners have zero EMA score")
-            await self._set_fallback_weights()
-            return
-
-        # Pairwise NCD dedup: exclude copy-cat miners before winner selection.
-        # Layer 1 (pack_hash grouping) catches exact copies.
-        # Layer 2 (NCD compression) catches paraphrased copies.
-        # Priority: lower on-chain block_number = original.
-        pack_info: Dict[str, Tuple[dict, int, str]] = {}
-        for uid in list(costs.keys()):
-            hotkey = uid_to_hotkey[uid]
-            pack = self._hotkey_packs.get(hotkey)
-            commitment = active.get(uid)
-            if pack is not None and commitment is not None:
-                pack_info[hotkey] = (
-                    pack, commitment.block_number, commitment.pack_hash
-                )
-
-        ncd_excluded = deduplicate_packs(
-            pack_info, self.config.similarity_threshold
-        )
-
-        if ncd_excluded:
-            hotkey_to_uid = {v: k for k, v in uid_to_hotkey.items()}
-            for copier_hk, original_hk in ncd_excluded.items():
-                copier_uid = hotkey_to_uid.get(copier_hk)
-                if copier_uid is not None:
-                    logger.warning(
-                        f"Miner {copier_uid} ({copier_hk[:8]}): "
-                        f"weight zeroed (NCD copy of {original_hk[:8]})"
-                    )
-                    scores.pop(copier_uid, None)
-                    costs.pop(copier_uid, None)
-                    qualified.pop(copier_uid, None)
-                    uid_to_hotkey.pop(copier_uid, None)
-
-        if not scores:
-            logger.warning("All scored miners excluded by NCD dedup")
             await self._set_fallback_weights()
             return
 
