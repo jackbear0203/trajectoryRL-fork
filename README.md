@@ -6,8 +6,6 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Bittensor](https://img.shields.io/badge/bittensor-7.0+-green.svg)](https://github.com/opentensor/bittensor)
 
-> **Status: Shadow Mode** — Validators are running real ClawBench evaluations and scoring miners, but weights are set to the subnet owner (UID 74) until stable behavior is confirmed. Miners can submit packs now — submissions are evaluated but rewards are not live yet.
-
 TrajectoryRL is a Bittensor subnet where miners compete to optimize AI agent policies for real-world tasks. Validators evaluate policy packs using deterministic scenarios, rewarding agents that are **safe**, **efficient**, and **reliable**.
 
 ## Overview
