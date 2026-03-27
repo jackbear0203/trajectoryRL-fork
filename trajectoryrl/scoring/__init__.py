@@ -178,6 +178,7 @@ class TrajectoryScorer:
         delta: float = 0.05,
         num_active_miners: Optional[int] = None,
         uid_to_hotkey: Optional[Dict[int, str]] = None,
+        champion_hotkey: Optional[str] = None,
     ) -> Dict[int, float]:
         """Select winner using winner-take-all with first-mover advantage.
 
@@ -186,21 +187,23 @@ class TrajectoryScorer:
         to encourage early adoption.  Once the miner count reaches the
         threshold, pure winner-take-all resumes.
 
-        Consensus-safe: miners whose scores differ by less than
-        ``consensus_epsilon`` are treated as tied. Ties are broken in favour
-        of the earliest submitter (by on-chain block number), which every
-        validator can resolve identically.
+        The δ threshold only protects the **current champion** (the miner
+        who won in the previous cycle).  A challenger must score more than
+        δ above the champion to dethrone them.  If no previous champion is
+        known, the earliest miner (by on-chain block) is used.
 
         Args:
             scores: Dict of miner_uid -> score [0, 1]
             first_mover_data: Dict of hotkey -> (score, block_number).
-                block_number is the on-chain block at which the miner first
+                block_number is the on-chain block at which the miner
                 submitted; lower block number = earlier submission.
             delta: First-mover threshold (new score must beat best + delta)
             num_active_miners: Total active miners in metagraph.
                 If None, defaults to len(scores).
             uid_to_hotkey: Dict of miner_uid -> hotkey. Required to bridge
                 UID-keyed scores with hotkey-keyed first_mover_data.
+            champion_hotkey: Hotkey of the previous cycle's winner.
+                If None, the earliest miner (by block) is used.
 
         Returns:
             Dict of miner_uid -> weight (sums to 1.0)
@@ -209,6 +212,7 @@ class TrajectoryScorer:
             return {}
 
         _uid_to_hotkey = uid_to_hotkey or {}
+        _hotkey_to_uid = {hk: uid for uid, hk in _uid_to_hotkey.items()}
 
         n_miners = num_active_miners if num_active_miners is not None else len(scores)
 
@@ -216,58 +220,76 @@ class TrajectoryScorer:
         if n_miners < self.bootstrap_threshold:
             return self._bootstrap_weights(scores, first_mover_data, _uid_to_hotkey)
 
-        # --- Steady-state: winner-take-all ---
+        # --- Steady-state: champion vs all challengers ---
 
         eps = self.consensus_epsilon
 
-        # First-mover iterative selection: start with the earliest miner
-        # as champion, then iterate through subsequent miners in block
-        # order.  A later miner must beat the current champion's score
-        # by more than δ to take the crown.  This naturally handles
-        # transitive protection (A protects against B which protects
-        # against C) without needing recursive checks.
-        #
-        # Miners without first_mover_data are appended at the end with
-        # infinite block number so they can still participate but never
-        # receive first-mover protection.
+        # Resolve champion UID
+        champion_uid = None
+        if champion_hotkey and champion_hotkey in _hotkey_to_uid:
+            cuid = _hotkey_to_uid[champion_hotkey]
+            if cuid in scores:
+                champion_uid = cuid
 
-        # Build (uid, score, block_number) tuples, sorted by block asc
-        uid_entries = []
-        for uid, score in scores.items():
+        # Fallback: earliest miner by block number
+        if champion_uid is None:
+            earliest_block = float("inf")
+            for uid in scores:
+                hk = _uid_to_hotkey.get(uid)
+                block = (
+                    first_mover_data[hk][1]
+                    if hk and hk in first_mover_data
+                    else float("inf")
+                )
+                if block < earliest_block:
+                    earliest_block = block
+                    champion_uid = uid
+            if champion_uid is None:
+                champion_uid = max(scores, key=scores.get)
+
+        champion_score = scores[champion_uid]
+
+        # Find the best challenger (highest score, ties broken by earliest block)
+        def _sort_key(uid: int) -> Tuple[float, float]:
             hk = _uid_to_hotkey.get(uid)
             block = (
                 first_mover_data[hk][1]
                 if hk and hk in first_mover_data
                 else float("inf")
             )
-            uid_entries.append((uid, score, block))
+            return (-scores[uid], block)
 
-        uid_entries.sort(key=lambda e: e[2])  # earliest first
+        best_challenger_uid = min(scores, key=_sort_key)
+        best_challenger_score = scores[best_challenger_uid]
 
-        # The earliest miner is the initial champion
-        best_uid, best_score, _ = uid_entries[0]
-
-        for uid, score, _ in uid_entries[1:]:
-            # Consensus epsilon: scores within ε are treated as tied,
-            # and the earlier miner (current champion) keeps the crown.
-            if score > best_score + eps:
-                # Challenger must also beat δ threshold
-                if score > best_score + delta:
-                    logger.info(
-                        f"First-mover overtake: Miner {uid} (score={score:.3f}) "
-                        f"beats champion Miner {best_uid} (score={best_score:.3f}, "
-                        f"required>{best_score + delta:.3f})"
-                    )
-                    best_uid = uid
-                    best_score = score
+        # Decide winner
+        if best_challenger_uid == champion_uid:
+            winner_uid = champion_uid
+        elif best_challenger_score > champion_score + eps and \
+                best_challenger_score > champion_score + delta:
+            logger.info(
+                f"First-mover overtake: Miner {best_challenger_uid} "
+                f"(score={best_challenger_score:.3f}) beats champion "
+                f"Miner {champion_uid} (score={champion_score:.3f}, "
+                f"required>{champion_score + delta:.3f})"
+            )
+            winner_uid = best_challenger_uid
+        else:
+            logger.info(
+                f"Champion Miner {champion_uid} (score={champion_score:.3f}) "
+                f"retains: best challenger Miner {best_challenger_uid} "
+                f"(score={best_challenger_score:.3f}) does not clear δ "
+                f"(required>{champion_score + delta:.3f})"
+            )
+            winner_uid = champion_uid
 
         # Winner takes all
         weights = {uid: 0.0 for uid in scores.keys()}
-        weights[best_uid] = 1.0
+        weights[winner_uid] = 1.0
 
         logger.info(
-            f"Winner-take-all: Miner {best_uid} wins with score {best_score:.3f} "
-            f"(delta={delta}, ε={eps})"
+            f"Winner-take-all: Miner {winner_uid} wins with score "
+            f"{scores[winner_uid]:.3f} (delta={delta}, ε={eps})"
         )
 
         return weights
@@ -280,14 +302,18 @@ class TrajectoryScorer:
         cost_delta: float = 0.10,
         num_active_miners: Optional[int] = None,
         uid_to_hotkey: Optional[Dict[int, str]] = None,
+        champion_hotkey: Optional[str] = None,
     ) -> Dict[int, float]:
         """Select winner by lowest cost, with qualification gate.
 
         Only qualified miners (all safety + correctness checks passed)
         compete. Among qualified miners, the one with lowest cost wins.
-        A challenger must be at least cost_delta (10%) cheaper than the
-        current champion to dethrone them (multiplicative first-mover
-        protection).
+
+        The δ threshold only protects the **current champion** (the miner
+        who won in the previous cycle).  A challenger must be at least
+        cost_delta (10%) cheaper than the champion to dethrone them.
+        If no previous champion is known, the earliest qualified miner
+        (by on-chain block) is used as the initial champion.
 
         Args:
             costs: Dict of miner_uid -> cost_usd
@@ -296,6 +322,8 @@ class TrajectoryScorer:
             cost_delta: Multiplicative threshold (challenger < champion * (1 - delta))
             num_active_miners: Total active miners for bootstrap check
             uid_to_hotkey: Dict of miner_uid -> hotkey
+            champion_hotkey: Hotkey of the previous cycle's winner.
+                If None, the earliest qualified miner (by block) is used.
 
         Returns:
             Dict of miner_uid -> weight (sums to 1.0)
@@ -304,6 +332,7 @@ class TrajectoryScorer:
             return {}
 
         _uid_to_hotkey = uid_to_hotkey or {}
+        _hotkey_to_uid = {hk: uid for uid, hk in _uid_to_hotkey.items()}
 
         # Filter to qualified miners only
         qualified_uids = {uid for uid, q in qualified.items() if q}
@@ -321,41 +350,85 @@ class TrajectoryScorer:
                 qualified_costs, first_mover_data, _uid_to_hotkey, costs,
             )
 
-        # Steady-state: winner-take-all by lowest cost
-        # Build (uid, cost, block_number) tuples, sorted by block asc
-        uid_entries = []
-        for uid, cost in qualified_costs.items():
+        # Steady-state: champion vs all challengers
+        #
+        # 1. Identify the current champion (previous winner, or earliest
+        #    qualified miner by block if no previous winner).
+        # 2. Find the lowest-cost qualified miner (best challenger).
+        # 3. If best challenger IS the champion → champion retains.
+        # 4. If best challenger is different → must beat
+        #    champion_cost × (1 - δ) to dethrone.
+        # 5. Ties (same cost) broken by earliest block number.
+
+        # Resolve champion UID
+        champion_uid = None
+        if champion_hotkey and champion_hotkey in _hotkey_to_uid:
+            cuid = _hotkey_to_uid[champion_hotkey]
+            if cuid in qualified_costs:
+                champion_uid = cuid
+
+        # Fallback: earliest qualified miner by block number
+        if champion_uid is None:
+            earliest_block = float("inf")
+            for uid in qualified_costs:
+                hk = _uid_to_hotkey.get(uid)
+                block = (
+                    first_mover_data[hk][1]
+                    if hk and hk in first_mover_data
+                    else float("inf")
+                )
+                if block < earliest_block:
+                    earliest_block = block
+                    champion_uid = uid
+            # If still None (no first_mover_data at all), pick lowest cost
+            if champion_uid is None:
+                champion_uid = min(qualified_costs, key=qualified_costs.get)
+
+        champion_cost = qualified_costs[champion_uid]
+
+        # Find the best challenger (lowest cost, ties broken by earliest block)
+        def _sort_key(uid: int) -> Tuple[float, float]:
             hk = _uid_to_hotkey.get(uid)
             block = (
                 first_mover_data[hk][1]
                 if hk and hk in first_mover_data
                 else float("inf")
             )
-            uid_entries.append((uid, cost, block))
+            return (qualified_costs[uid], block)
 
-        uid_entries.sort(key=lambda e: e[2])  # earliest first
+        best_challenger_uid = min(qualified_costs, key=_sort_key)
+        best_challenger_cost = qualified_costs[best_challenger_uid]
 
-        # Earliest qualified miner is the initial champion
-        best_uid, best_cost, _ = uid_entries[0]
-
-        for uid, cost, _ in uid_entries[1:]:
-            # Challenger must be significantly cheaper (multiplicative delta)
-            if cost < best_cost * (1 - cost_delta):
-                logger.info(
-                    f"Cost overtake: Miner {uid} (${cost:.4f}) beats "
-                    f"champion Miner {best_uid} (${best_cost:.4f}, "
-                    f"required<${best_cost * (1 - cost_delta):.4f})"
-                )
-                best_uid = uid
-                best_cost = cost
+        # Decide winner
+        if best_challenger_uid == champion_uid:
+            # Champion is already the cheapest — retains crown
+            winner_uid = champion_uid
+        elif best_challenger_cost < champion_cost * (1 - cost_delta):
+            # Challenger beats δ threshold — dethrones champion
+            logger.info(
+                f"Cost overtake: Miner {best_challenger_uid} "
+                f"(${best_challenger_cost:.4f}) beats champion "
+                f"Miner {champion_uid} (${champion_cost:.4f}, "
+                f"required<${champion_cost * (1 - cost_delta):.4f})"
+            )
+            winner_uid = best_challenger_uid
+        else:
+            # Challenger is cheaper but doesn't clear δ — champion retains
+            logger.info(
+                f"Champion Miner {champion_uid} (${champion_cost:.4f}) "
+                f"retains: best challenger Miner {best_challenger_uid} "
+                f"(${best_challenger_cost:.4f}) does not clear δ "
+                f"(required<${champion_cost * (1 - cost_delta):.4f})"
+            )
+            winner_uid = champion_uid
 
         # Winner takes all; disqualified miners get 0
         weights = {uid: 0.0 for uid in costs}
-        weights[best_uid] = 1.0
+        weights[winner_uid] = 1.0
 
         logger.info(
-            f"Cost winner-take-all: Miner {best_uid} wins with "
-            f"cost=${best_cost:.4f} (delta={cost_delta})"
+            f"Cost winner-take-all: Miner {winner_uid} wins with "
+            f"cost=${qualified_costs[winner_uid]:.4f} (delta={cost_delta})"
         )
 
         return weights

@@ -164,8 +164,11 @@ class TrajectoryValidator:
         # Packs by hotkey (populated during evaluation for NCD dedup)
         self._hotkey_packs: Dict[str, dict] = {}
 
-        # First-mover tracking: {hotkey: (best_score, first_block_number)}
+        # First-mover tracking: {hotkey: (best_cost, block_number)}
         self.first_mover_data: Dict[str, Tuple[float, float]] = {}
+
+        # Previous cycle's winner hotkey (for δ champion protection)
+        self.champion_hotkey: Optional[str] = None
 
         # Tracks which UID each hotkey was last evaluated at for re-registration detection.
         self._hotkey_uid_map: Dict[str, int] = {}
@@ -252,6 +255,7 @@ class TrajectoryValidator:
                 k: (v[0], v[1])
                 for k, v in data.get("first_mover_data", {}).items()
             }
+            self.champion_hotkey = data.get("champion_hotkey")
 
             # Load integrity judge cache if present
             integrity_cache = data.get("integrity_cache")
@@ -274,6 +278,7 @@ class TrajectoryValidator:
             "ema_pack_hash": self._ema_pack_hash,
             "last_eval_block": self.last_eval_block,
             "first_mover_data": self.first_mover_data,
+            "champion_hotkey": self.champion_hotkey,
             "integrity_cache": self.integrity_judge.dump_cache(),
         }
         try:
@@ -1113,7 +1118,8 @@ class TrajectoryValidator:
                 total_cost = self.compute_total_cost_from_ema(hotkey)
                 if total_cost is not None:
                     self._update_first_mover(
-                        uid, hotkey, total_cost, float(commitment.block_number)
+                        uid, hotkey, total_cost, float(commitment.block_number),
+                        pack_hash=commitment.pack_hash,
                     )
 
             else:
@@ -1299,10 +1305,16 @@ class TrajectoryValidator:
         hotkey: str,
         cost: float,
         block_number: float,
+        pack_hash: Optional[str] = None,
     ) -> None:
         """Detect re-registration and update first-mover data for a miner.
 
         Tracks best (lowest) cost. Lower cost = better.
+
+        When a miner submits a new pack (pack_hash changed), the block
+        number is reset to the new commitment's block.  This ensures
+        first-mover protection reflects the current pack's submission
+        time, not a historical one.
         """
         prev_uid = self._hotkey_uid_map.get(hotkey)
         if prev_uid is not None and prev_uid != miner_uid:
@@ -1313,12 +1325,29 @@ class TrajectoryValidator:
             self.first_mover_data.pop(hotkey, None)
         self._hotkey_uid_map[hotkey] = miner_uid
 
+        # Detect pack change: if pack_hash differs from EMA tracking,
+        # the miner submitted a new pack → reset block to new commitment.
+        current_ema_hash = self._ema_pack_hash.get(hotkey)
+        pack_changed = (
+            pack_hash is not None
+            and current_ema_hash is not None
+            and pack_hash != current_ema_hash
+        )
+
         if hotkey not in self.first_mover_data:
             self.first_mover_data[hotkey] = (cost, block_number)
             self._get_miner_logger(hotkey).info(
                 f"First submission (cost=${cost:.4f}, block={block_number:.0f})"
             )
+        elif pack_changed:
+            # New pack → reset block number to new commitment block
+            self.first_mover_data[hotkey] = (cost, block_number)
+            self._get_miner_logger(hotkey).info(
+                f"Pack changed, reset first-mover block to {block_number:.0f} "
+                f"(cost=${cost:.4f})"
+            )
         elif cost < self.first_mover_data[hotkey][0]:
+            # Same pack, cost improved (EMA drift) → keep original block
             original_block = self.first_mover_data[hotkey][1]
             self.first_mover_data[hotkey] = (cost, original_block)
             self._get_miner_logger(hotkey).info(
@@ -2140,7 +2169,13 @@ class TrajectoryValidator:
             cost_delta=self.config.cost_delta,
             num_active_miners=num_active,
             uid_to_hotkey=uid_to_hotkey,
+            champion_hotkey=self.champion_hotkey,
         )
+
+        # Update champion_hotkey to this cycle's winner
+        winner_uid = max(weights_dict, key=weights_dict.get)
+        if winner_uid in uid_to_hotkey:
+            self.champion_hotkey = uid_to_hotkey[winner_uid]
 
         # Apply burn: scale miner weights by (1 - BURN_FRACTION),
         # give BURN_FRACTION to owner UID (burned by the chain).

@@ -1656,6 +1656,10 @@ class TestPerScenarioEMA:
             validator.latest_model_usage = {}
             validator.current_winner_pack = None
             validator.current_winner_hotkey = None
+            validator.champion_hotkey = None
+            validator._miner_loggers = {}
+            validator._miner_log_dir = Path("/tmp/test_logs/miners")
+            validator._miner_log_dir.mkdir(parents=True, exist_ok=True)
             validator.scenarios = {
                 "client_escalation": {"weight": 1.5},
                 "morning_brief": {"weight": 1.0},
@@ -1806,18 +1810,30 @@ class TestPerScenarioEMA:
         assert v.is_fully_qualified("hk_0") is False
 
     def test_first_mover_tracks_cost(self):
-        """First-mover data tracks best (lowest) cost."""
+        """First-mover data tracks best (lowest) cost, block preserved for same pack."""
         v = self._make_validator()
-        v._update_first_mover(0, "hk_0", cost=0.050, block_number=1000.0)
+        v._ema_pack_hash["hk_0"] = "hash_a"
+        v._update_first_mover(0, "hk_0", cost=0.050, block_number=1000.0, pack_hash="hash_a")
         assert v.first_mover_data["hk_0"] == (0.050, 1000.0)
 
-        # Cost improves (lower)
-        v._update_first_mover(0, "hk_0", cost=0.030, block_number=2000.0)
+        # Cost improves (lower), same pack → block preserved
+        v._update_first_mover(0, "hk_0", cost=0.030, block_number=2000.0, pack_hash="hash_a")
         assert v.first_mover_data["hk_0"] == (0.030, 1000.0)  # block preserved
 
-        # Cost regresses (higher) — no update
-        v._update_first_mover(0, "hk_0", cost=0.040, block_number=3000.0)
+        # Cost regresses (higher), same pack → no update
+        v._update_first_mover(0, "hk_0", cost=0.040, block_number=3000.0, pack_hash="hash_a")
         assert v.first_mover_data["hk_0"] == (0.030, 1000.0)
+
+    def test_first_mover_block_resets_on_pack_change(self):
+        """When pack_hash changes, first-mover block resets to new commitment."""
+        v = self._make_validator()
+        v._ema_pack_hash["hk_0"] = "hash_a"
+        v._update_first_mover(0, "hk_0", cost=0.050, block_number=1000.0, pack_hash="hash_a")
+        assert v.first_mover_data["hk_0"] == (0.050, 1000.0)
+
+        # New pack submitted → block resets
+        v._update_first_mover(0, "hk_0", cost=0.040, block_number=5000.0, pack_hash="hash_b")
+        assert v.first_mover_data["hk_0"] == (0.040, 5000.0)  # block updated
 
     def test_ema_invalidated_on_scenario_pool_change(self):
         """Loading EMA state with different scenario config invalidates all state."""
@@ -1910,6 +1926,10 @@ class TestInactivityBlocks:
             validator.latest_model_usage = {}
             validator.current_winner_pack = None
             validator.current_winner_hotkey = None
+            validator.champion_hotkey = None
+            validator._miner_loggers = {}
+            validator._miner_log_dir = Path("/tmp/test_logs/miners")
+            validator._miner_log_dir.mkdir(parents=True, exist_ok=True)
             validator.integrity_judge = MagicMock()
             validator.integrity_judge.dump_cache.return_value = {}
             validator.trajectory_judge = MagicMock()
@@ -2116,6 +2136,7 @@ class TestScoringIntegration:
             cost_delta=0.10,
             num_active_miners=20,
             uid_to_hotkey=uid_to_hotkey,
+            champion_hotkey="hk_0",  # miner 0 was previous champion
         )
 
         # Miner 1 has lowest cost and is qualified ($0.030 < $0.050 * 0.90 = $0.045)
@@ -2124,11 +2145,11 @@ class TestScoringIntegration:
         assert weights[2] == 0.0  # disqualified
 
     def test_cost_first_mover_protection(self, scorer):
-        """First-mover protection: challenger must be 10% cheaper."""
+        """First-mover protection: challenger must be 10% cheaper than champion."""
         costs = {0: 0.050, 1: 0.048}  # 1 is cheaper but not by 10%
         qualified = {0: True, 1: True}
         first_mover = {
-            "hk_0": (0.050, 100.0),  # submitted first
+            "hk_0": (0.050, 100.0),  # champion (submitted first)
             "hk_1": (0.048, 200.0),
         }
         uid_to_hotkey = {0: "hk_0", 1: "hk_1"}
@@ -2140,11 +2161,96 @@ class TestScoringIntegration:
             cost_delta=0.10,
             num_active_miners=20,
             uid_to_hotkey=uid_to_hotkey,
+            champion_hotkey="hk_0",
         )
 
         # Miner 0 wins: $0.048 is NOT < $0.050 * 0.90 = $0.045
         assert weights[0] == 1.0
         assert weights[1] == 0.0
+
+    def test_cost_delta_only_protects_champion(self, scorer):
+        """δ only protects the actual champion, not intermediate miners.
+
+        Reproduces the 91-vs-224 bug: champion is miner 233 ($0.0196).
+        Miner 91 ($0.0172) and miner 224 ($0.0156) are both new challengers.
+        Under the old iterative algorithm, 91 would overtake 233 and then
+        block 224 via transitive δ protection. Under the new algorithm,
+        224 should win because it beats the champion (233) by >10%.
+        """
+        costs = {233: 0.0196, 91: 0.0172, 224: 0.0156}
+        qualified = {233: True, 91: True, 224: True}
+        first_mover = {
+            "hk_233": (0.0196, 100.0),  # earliest block
+            "hk_91": (0.0172, 200.0),
+            "hk_224": (0.0156, 300.0),  # latest block
+        }
+        uid_to_hotkey = {233: "hk_233", 91: "hk_91", 224: "hk_224"}
+
+        weights = scorer.select_winner_by_cost(
+            costs=costs,
+            qualified=qualified,
+            first_mover_data=first_mover,
+            cost_delta=0.10,
+            num_active_miners=20,
+            uid_to_hotkey=uid_to_hotkey,
+            champion_hotkey="hk_233",  # 233 was previous winner
+        )
+
+        # 224 ($0.0156) < $0.0196 * 0.90 = $0.01764 → beats champion
+        # 224 is cheaper than 91, so 224 should be the winner
+        assert weights[224] == 1.0, "224 should win (cheapest, beats champion δ)"
+        assert weights[91] == 0.0
+        assert weights[233] == 0.0
+
+    def test_cost_champion_retains_when_no_challenger_clears_delta(self, scorer):
+        """Champion retains when all challengers are cheaper but within δ."""
+        costs = {0: 0.050, 1: 0.046, 2: 0.047}
+        qualified = {0: True, 1: True, 2: True}
+        first_mover = {
+            "hk_0": (0.050, 100.0),
+            "hk_1": (0.046, 200.0),
+            "hk_2": (0.047, 300.0),
+        }
+        uid_to_hotkey = {0: "hk_0", 1: "hk_1", 2: "hk_2"}
+
+        weights = scorer.select_winner_by_cost(
+            costs=costs,
+            qualified=qualified,
+            first_mover_data=first_mover,
+            cost_delta=0.10,
+            num_active_miners=20,
+            uid_to_hotkey=uid_to_hotkey,
+            champion_hotkey="hk_0",
+        )
+
+        # Best challenger $0.046 is NOT < $0.050 * 0.90 = $0.045
+        assert weights[0] == 1.0
+        assert weights[1] == 0.0
+        assert weights[2] == 0.0
+
+    def test_cost_no_champion_falls_back_to_earliest_block(self, scorer):
+        """Without champion_hotkey, earliest qualified miner by block is champion."""
+        costs = {0: 0.050, 1: 0.030}
+        qualified = {0: True, 1: True}
+        first_mover = {
+            "hk_0": (0.050, 100.0),  # earliest block → becomes champion
+            "hk_1": (0.030, 200.0),
+        }
+        uid_to_hotkey = {0: "hk_0", 1: "hk_1"}
+
+        weights = scorer.select_winner_by_cost(
+            costs=costs,
+            qualified=qualified,
+            first_mover_data=first_mover,
+            cost_delta=0.10,
+            num_active_miners=20,
+            uid_to_hotkey=uid_to_hotkey,
+            # No champion_hotkey — fallback to earliest block
+        )
+
+        # Miner 1 ($0.030) < $0.050 * 0.90 = $0.045 → beats earliest-block champion
+        assert weights[1] == 1.0
+        assert weights[0] == 0.0
 
     def test_cost_all_disqualified(self, scorer):
         """All miners disqualified → zero weights."""
