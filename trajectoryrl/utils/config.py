@@ -71,7 +71,6 @@ class ValidatorConfig:
     seeds_per_task: int = 1
     eval_interval_blocks: int = 7200  # ~24 hours at 12s/block (window length)
     eval_utc_hour: int = 0           # UTC hour to trigger daily eval cycle (0 = midnight)
-    eval_on_startup: bool = True     # Run eval immediately on validator startup
     timeout_per_scenario: int = 300  # 5 minutes max per scenario
 
     # Evaluation window config (block-aligned consensus protocol)
@@ -204,7 +203,6 @@ class ValidatorConfig:
             judge_base_url=os.getenv("JUDGE_BASE_URL", ""),
             # --- Operational ---
             log_level=os.getenv("LOG_LEVEL", "INFO"),
-            eval_on_startup=os.getenv("EVAL_ON_STARTUP", "1") == "1",
             # --- Consensus CAS ---
             ipfs_api_url=os.getenv("IPFS_API_URL", "http://ipfs.metahash73.com:5001/api/v0"),
             ipfs_gateway_urls=[

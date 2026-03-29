@@ -260,10 +260,6 @@ class TrajectoryValidator:
         )
         self._winner_state = load_winner_state(self._winner_state_path)
 
-        # Set to True on startup when eval_on_startup=True; cleared after first eval
-        self._startup_eval_pending: bool = config.eval_on_startup
-
-
 
         # Load scenarios
         self.scenarios = self._load_scenarios()
@@ -935,13 +931,8 @@ class TrajectoryValidator:
     def _should_start_evaluation(self, current_block: int) -> bool:
         """Return True if a new evaluation cycle should start.
 
-        Block-based: fires when we enter a new evaluation window and are
-        in the evaluation phase.  Also fires on startup if eval_on_startup
-        is set and no eval has run yet.
+        Block-based: fires once per window during the evaluation phase.
         """
-        if self._startup_eval_pending:
-            return True
-
         window = compute_window(current_block, self._window_config)
         if window.phase != WindowPhase.EVALUATION:
             return False
@@ -1009,7 +1000,6 @@ class TrajectoryValidator:
                     self._last_eval_at = int(time.time())
                     self._last_eval_window = window.window_number
                     self._last_eval_date = datetime.datetime.utcnow().date()
-                    self._startup_eval_pending = False
                     self.last_weight_block = self.subtensor.get_current_block()
 
                     self.pack_fetcher.cleanup_cache(
@@ -1020,7 +1010,6 @@ class TrajectoryValidator:
 
                 # --- Window phase: submission (idempotent — checks on-chain) ---
                 if (window.phase == WindowPhase.PROPAGATION
-                        and self._last_eval_window == window.window_number
                         and not self._check_own_commitment_on_chain(window.window_number)):
                     logger.info(
                         "Window %d: submitting evaluation results at block %d",
@@ -1036,7 +1025,6 @@ class TrajectoryValidator:
 
                 # --- Window phase: aggregation (idempotent — checks _consensus_window) ---
                 if (window.phase == WindowPhase.AGGREGATION
-                        and self._last_eval_window == window.window_number
                         and self._consensus_window != window.window_number):
                     logger.info(
                         f"Window {window.window_number}: T_aggregate reached "
@@ -1609,23 +1597,6 @@ class TrajectoryValidator:
 
         # 5. Re-assert winner weights after eval completes
         await self._set_winner_weights()
-
-    def _should_run_eval_today(self) -> bool:
-        """Return True if an eval should be triggered now.
-
-        Fires when:
-        - eval_on_startup=True and no eval has run yet this process, OR
-        - UTC hour >= eval_utc_hour and today's eval has not yet completed.
-        """
-        if self._startup_eval_pending:
-            return True
-        now = datetime.datetime.utcnow()
-        if now.hour < self.config.eval_utc_hour:
-            return False
-        today = now.date()
-        if self._last_eval_date is not None and self._last_eval_date >= today:
-            return False
-        return True
 
     def _needs_evaluation(
         self, hotkey: str, pack_hash: str, current_block: int
