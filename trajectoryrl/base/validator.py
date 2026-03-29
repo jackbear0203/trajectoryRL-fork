@@ -241,7 +241,10 @@ class TrajectoryValidator:
             return "0x" + (sig if isinstance(sig, bytes) else bytes(sig)).hex()
 
         self._consensus_store = ConsensusStore(
-            ipfs=IPFSBackend(api_url=config.ipfs_api_url, api_token=config.ipfs_api_jwt_token),
+            ipfs=IPFSBackend(
+                api_url=config.ipfs_api_url,
+                gateway_urls=config.ipfs_gateway_urls,
+            ),
             api=TrajRLAPIBackend(
                 base_url=config.consensus_api_url,
                 sign_fn=_sign_consensus_msg,

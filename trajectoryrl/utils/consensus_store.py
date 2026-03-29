@@ -1,19 +1,18 @@
 """Dual-backend CAS for consensus payloads: IPFS primary, trajrl.com/GCS fallback.
 
 Upload: try IPFS first, then trajrl.com API (which stores to GCS) if IPFS fails.
-Download: try IPFS first, then direct URL (GCS or other) if IPFS fails.
+Download: try IPFS kubo API first, then public gateways, then GCS URL fallback.
 Both backends are written on upload (best-effort) for redundancy.
 
 Pointer registry is on-chain via Bittensor ``set_commitment`` — not handled here.
 """
 
 import asyncio
-import asyncio
 import hashlib
 import json
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import List, Optional
 
 import aiohttp
 
@@ -44,27 +43,32 @@ class CASBackend(ABC):
 
 
 class IPFSBackend(CASBackend):
-    """IPFS via local kubo node HTTP API.
+    """IPFS via kubo-compatible HTTP API with public gateway fallback.
 
-    Upload:   POST /api/v0/add (auto-pins)
-    Download: POST /api/v0/cat?arg={cid}
+    Upload:   POST {api_url}/add
+    Download: POST {api_url}/cat?arg={cid} (primary),
+              then GET {gateway}/ipfs/{cid} for each fallback gateway.
+
+    api_url should include the /api/v0 prefix,
+    e.g. ``http://ipfs.metahash73.com:5001/api/v0``.
     """
 
-    def __init__(self, api_url: str = "http://localhost:5001", api_token: str = ""):
+    def __init__(
+        self,
+        api_url: str = "http://ipfs.metahash73.com:5001/api/v0",
+        gateway_urls: Optional[List[str]] = None,
+    ):
         self.api_url = api_url.rstrip("/")
-        self._api_token = api_token
-
-    def _auth_headers(self) -> dict:
-        if self._api_token:
-            return {"Authorization": f"Bearer {self._api_token}"}
-        return {}
+        self._gateway_urls = [
+            gw.rstrip("/") for gw in (gateway_urls or [])
+        ]
 
     async def upload(self, data: bytes) -> Optional[str]:
         try:
-            url = f"{self.api_url}/api/v0/add"
+            url = f"{self.api_url}/add"
             form = aiohttp.FormData()
             form.add_field("file", data, content_type="application/octet-stream")
-            async with aiohttp.ClientSession(headers=self._auth_headers()) as session:
+            async with aiohttp.ClientSession() as session:
                 async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if resp.status != 200:
                         logger.warning("IPFS upload failed: HTTP %d", resp.status)
@@ -79,29 +83,64 @@ class IPFSBackend(CASBackend):
             return None
 
     async def download(self, address: str) -> Optional[bytes]:
+        """Download CID: try kubo API first, then public gateways sequentially."""
+        data = await self._download_via_api(address)
+        if data is not None:
+            return data
+        for gw in self._gateway_urls:
+            data = await self._download_via_gateway(gw, address)
+            if data is not None:
+                return data
+        return None
+
+    async def _download_via_api(self, cid: str) -> Optional[bytes]:
+        """Download via kubo HTTP API (POST /cat)."""
         try:
-            url = f"{self.api_url}/api/v0/cat"
-            async with aiohttp.ClientSession(headers=self._auth_headers()) as session:
+            url = f"{self.api_url}/cat"
+            async with aiohttp.ClientSession() as session:
                 async with session.post(
                     url,
-                    params={"arg": address},
+                    params={"arg": cid},
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
                     if resp.status != 200:
-                        logger.warning("IPFS download failed: HTTP %d (CID=%s)", resp.status, address)
+                        logger.warning("IPFS API download failed: HTTP %d (CID=%s)", resp.status, cid)
                         return None
-                    if resp.content_length and resp.content_length > MAX_PAYLOAD_BYTES:
-                        logger.warning("IPFS download too large: %d bytes (CID=%s)", resp.content_length, address)
-                        return None
-                    data = await resp.content.read(MAX_PAYLOAD_BYTES + 1)
-                    if len(data) > MAX_PAYLOAD_BYTES:
-                        logger.warning("IPFS download exceeded max size: %d bytes (CID=%s)", len(data), address)
-                        return None
-                    logger.debug("IPFS download OK: CID=%s, %d bytes", address, len(data))
-                    return data
+                    return await self._read_body(resp, cid, "IPFS API")
         except Exception as e:
-            logger.warning("IPFS download error (CID=%s): %s", address, e)
+            logger.warning("IPFS API download error (CID=%s): %s", cid, e)
             return None
+
+    async def _download_via_gateway(self, gateway_url: str, cid: str) -> Optional[bytes]:
+        """Download via public IPFS gateway (HTTP GET)."""
+        url = f"{gateway_url}/ipfs/{cid}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning(
+                            "IPFS gateway %s download failed: HTTP %d (CID=%s)",
+                            gateway_url, resp.status, cid,
+                        )
+                        return None
+                    return await self._read_body(resp, cid, gateway_url)
+        except Exception as e:
+            logger.warning("IPFS gateway %s download error (CID=%s): %s", gateway_url, cid, e)
+            return None
+
+    @staticmethod
+    async def _read_body(resp: aiohttp.ClientResponse, cid: str, source: str) -> Optional[bytes]:
+        if resp.content_length and resp.content_length > MAX_PAYLOAD_BYTES:
+            logger.warning("%s download too large: %d bytes (CID=%s)", source, resp.content_length, cid)
+            return None
+        data = await resp.content.read(MAX_PAYLOAD_BYTES + 1)
+        if len(data) > MAX_PAYLOAD_BYTES:
+            logger.warning("%s download exceeded max size: %d bytes (CID=%s)", source, len(data), cid)
+            return None
+        logger.debug("%s download OK: CID=%s, %d bytes", source, cid, len(data))
+        return data
 
 
 class TrajRLAPIBackend(CASBackend):
@@ -113,7 +152,7 @@ class TrajRLAPIBackend(CASBackend):
 
     def __init__(
         self,
-        base_url: str = "https://api.trajrl.com",
+        base_url: str = "https://trajrl.com",
         sign_fn=None,
         validator_hotkey: str = "",
     ):

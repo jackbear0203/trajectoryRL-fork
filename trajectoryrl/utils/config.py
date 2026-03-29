@@ -94,9 +94,11 @@ class ValidatorConfig:
     qualification_stake_threshold: float = 0.5  # stake-weighted majority for qualification
 
     # Consensus CAS: IPFS primary, trajrl.com API fallback
-    ipfs_api_url: str = "http://localhost:5001"
-    ipfs_api_jwt_token: str = ""
-    consensus_api_url: str = "https://api.trajrl.com"
+    ipfs_api_url: str = "http://ipfs.metahash73.com:5001/api/v0"
+    ipfs_gateway_urls: List[str] = field(
+        default_factory=lambda: ["https://ipfs.io", "https://dweb.link"]
+    )
+    consensus_api_url: str = "https://trajrl.com"
     min_validator_stake: float = 10000.0  # minimum stake weight (α) for consensus participation
 
     # Bootstrap config (graduated rewards until enough miners join)
@@ -204,9 +206,13 @@ class ValidatorConfig:
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             eval_on_startup=os.getenv("EVAL_ON_STARTUP", "1") == "1",
             # --- Consensus CAS ---
-            ipfs_api_url=os.getenv("IPFS_API_URL", "http://localhost:5001"),
-            ipfs_api_jwt_token=os.getenv("IPFS_API_JWT_TOKEN", ""),
-            consensus_api_url=os.getenv("CONSENSUS_API_URL", "https://api.trajrl.com"),
+            ipfs_api_url=os.getenv("IPFS_API_URL", "http://ipfs.metahash73.com:5001/api/v0"),
+            ipfs_gateway_urls=[
+                gw.strip() for gw in
+                os.getenv("IPFS_GATEWAYS", "https://ipfs.io,https://dweb.link").split(",")
+                if gw.strip()
+            ],
+            consensus_api_url=os.getenv("CONSENSUS_API_URL", "https://trajrl.com"),
             # --- IM parameters are hardcoded (dataclass defaults) ---
             # Do NOT load from env: cost_delta,
             # rho_reliability, consensus_epsilon, bootstrap_threshold,
