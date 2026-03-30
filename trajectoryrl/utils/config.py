@@ -215,7 +215,7 @@ class ValidatorConfig:
             ],
             consensus_api_url=os.getenv("CONSENSUS_API_URL", "https://trajrl.com"),
             # --- Startup aggregation ---
-            aggregate_when_start=os.getenv("AGGREGATE_WHEN_START", "0") == "1",
+            aggregate_when_start=os.getenv("AGGREGATE_WHEN_START", "1") == "1",
             # --- IM parameters are hardcoded (dataclass defaults) ---
             # Do NOT load from env: cost_delta,
             # rho_reliability, consensus_epsilon, bootstrap_threshold,
