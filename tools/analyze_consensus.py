@@ -1,15 +1,15 @@
 """Analyze validator consensus from on-chain data and simulate winner election.
 
-Connects to Bittensor subtensor, reads validator consensus commitments,
-downloads payloads from IPFS (kubo API + public gateways) with JSON
-integrity validation per source, runs the same filter pipeline and
-consensus computation used in production, then applies Winner Protection
-to determine the elected winner.
+Connects to Bittensor subtensor, reads the current validator consensus
+commitments (each validator keeps only one on-chain record, overwritten
+every cycle), downloads payloads from IPFS (kubo API + public gateways)
+with JSON integrity validation per source, runs the same filter pipeline
+and consensus computation used in production, then applies Winner
+Protection to determine the elected winner.
 
 Usage:
     python tools/analyze_consensus.py
     python tools/analyze_consensus.py --network finney --netuid 11
-    python tools/analyze_consensus.py --window 1090
     python tools/analyze_consensus.py --prev-winner 5Ew5PrAd... --prev-winner-cost 0.015
 """
 
@@ -120,10 +120,7 @@ async def run(args):
     for w in sorted(window_counts.keys()):
         print(f"    Window {w}: {window_counts[w]} validators")
 
-    if args.window is not None:
-        target_window = args.window
-    else:
-        target_window = max(window_counts, key=window_counts.get)
+    target_window = max(window_counts, key=window_counts.get)
     print(f"\n  Target window: {target_window}")
 
     # ---- 3. Download payloads (with per-source JSON validation) -------------
@@ -255,8 +252,6 @@ def main():
     )
     parser.add_argument("--network", default=NETWORK)
     parser.add_argument("--netuid", type=int, default=NETUID)
-    parser.add_argument("--window", type=int, default=None,
-                        help="Target window (auto-detect if omitted)")
     parser.add_argument("--prev-winner", type=str, default=None)
     parser.add_argument("--prev-winner-cost", type=float, default=None)
     parser.add_argument("--qual-threshold", type=float, default=0.5)

@@ -9,8 +9,7 @@ Reads all validator consensus commitments from the Bittensor chain, downloads ev
 ### Usage
 
 ```bash
-python3 tools/analyze_consensus.py                                       # auto-detect latest window
-python3 tools/analyze_consensus.py --window 1090                         # specific window
+python3 tools/analyze_consensus.py                                       # run with defaults
 python3 tools/analyze_consensus.py --network finney --netuid 11          # explicit chain params
 python3 tools/analyze_consensus.py --prev-winner 5Ew5P... --prev-winner-cost 0.015  # simulate winner protection
 python3 tools/analyze_consensus.py --qual-threshold 0.5 --cost-delta 0.10           # tune consensus params
@@ -30,7 +29,6 @@ python3 tools/analyze_consensus.py --qual-threshold 0.5 --cost-delta 0.10       
 |------|---------|-------------|
 | `--network` | `finney` | Subtensor network |
 | `--netuid` | `11` | Subnet UID |
-| `--window` | auto | Target window number (picks the most common if omitted) |
 | `--prev-winner` | none | Previous winner hotkey for Winner Protection simulation |
 | `--prev-winner-cost` | none | Previous winner's locked-in cost |
 | `--qual-threshold` | `0.5` | Stake fraction required for consensus qualification |
