@@ -115,6 +115,9 @@ class ValidatorConfig:
     # Weight cadence (set weights every tempo)
     weight_interval_blocks: int = 360  # 1 tempo ≈ 72 min at 12s/block
 
+    # Startup aggregation: run consensus aggregation before entering main loop
+    aggregate_when_start: bool = False
+
     # ClawBench LLM configuration (passed to init container & OpenClaw gateway)
     clawbench_default_model: str = DEFAULT_CLAWBENCH_MODEL
     clawbench_api_key: str = ""
@@ -211,6 +214,8 @@ class ValidatorConfig:
                 if gw.strip()
             ],
             consensus_api_url=os.getenv("CONSENSUS_API_URL", "https://trajrl.com"),
+            # --- Startup aggregation ---
+            aggregate_when_start=os.getenv("AGGREGATE_WHEN_START", "0") == "1",
             # --- IM parameters are hardcoded (dataclass defaults) ---
             # Do NOT load from env: cost_delta,
             # rho_reliability, consensus_epsilon, bootstrap_threshold,

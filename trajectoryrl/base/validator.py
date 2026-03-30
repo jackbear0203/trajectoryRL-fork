@@ -26,7 +26,7 @@ import logging
 import os
 import time
 import yaml
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -933,6 +933,78 @@ class TrajectoryValidator:
 
         self._save_ema_state()
 
+    async def _aggregate_on_startup(self):
+        """Run consensus aggregation once at startup before entering the main loop.
+
+        Reads on-chain validator commitments to find the latest window with
+        submissions, then reuses ``_run_consensus_aggregation`` and
+        ``_set_winner_weights`` to compute the winner and set weights
+        immediately — without waiting for the normal window lifecycle.
+
+        This is a side-effect-free operation with respect to the main loop:
+        ``_consensus_window`` is saved and restored so the normal per-window
+        aggregation guard is not consumed.
+        """
+        logger.info("=" * 60)
+        logger.info("aggregate_when_start enabled — running startup aggregation")
+        logger.info("=" * 60)
+
+        self._sync_metagraph(caller="aggregate_on_startup")
+
+        chain_commitments = fetch_validator_consensus_commitments(
+            self.subtensor, self.config.netuid, self.metagraph,
+        )
+        if not chain_commitments:
+            logger.warning(
+                "Startup aggregation: no consensus commitments on chain, skipping"
+            )
+            return
+
+        window_counts = Counter(vc.window_number for vc in chain_commitments)
+        target_window = max(window_counts.keys())
+        logger.info(
+            "Startup aggregation: found %d commitments across windows %s, "
+            "targeting latest window %d (%d submissions)",
+            len(chain_commitments), dict(window_counts),
+            target_window, window_counts[target_window],
+        )
+
+        synthetic_window = EvaluationWindow(
+            window_number=target_window,
+            window_start=self._window_config.global_anchor
+            + target_window * self._window_config.window_length,
+            block_offset=self._window_config.window_length - 1,
+            phase=WindowPhase.AGGREGATION,
+            blocks_into_phase=0,
+            blocks_remaining_in_phase=1,
+            publish_offset=self._window_config.publish_block,
+            aggregate_offset=self._window_config.aggregate_block,
+        )
+
+        saved_consensus_window = self._consensus_window
+        await self._run_consensus_aggregation(synthetic_window)
+        aggregation_succeeded = (self._consensus_window == target_window)
+
+        self._consensus_window = saved_consensus_window
+        self._save_ema_state()
+
+        if aggregation_succeeded:
+            await self._set_winner_weights()
+            current_block = self.subtensor.get_current_block()
+            self.last_weight_block = current_block
+            logger.info(
+                "Startup aggregation complete: winner=%s, weights set at block %d",
+                self._winner_state.winner_hotkey
+                and self._winner_state.winner_hotkey[:8],
+                current_block,
+            )
+        else:
+            logger.warning(
+                "Startup aggregation: consensus aggregation did not produce "
+                "a result for window %d, skipping weight setting",
+                target_window,
+            )
+
     def _should_start_evaluation(self, current_block: int) -> bool:
         """Return True if a new evaluation cycle should start.
 
@@ -970,6 +1042,15 @@ class TrajectoryValidator:
             f"Weight interval: {self.config.weight_interval_blocks} blocks "
             f"(~{self.config.weight_interval_blocks * 12 // 60}min)"
         )
+
+        if self.config.aggregate_when_start:
+            try:
+                await self._aggregate_on_startup()
+            except Exception as e:
+                logger.error(
+                    "Startup aggregation failed: %s — continuing to main loop",
+                    e, exc_info=True,
+                )
 
         while True:
             try:
