@@ -1,14 +1,17 @@
 """Block-based evaluation window computation.
 
-All validators operate on synchronized evaluation windows derived from chain
-block height.  Any validator can independently compute the current window
-number and phase -- no central coordination needed.
+All validators operate on synchronized epochs derived from chain block height.
+An epoch is the subnet's validation cycle (evaluate -> submit -> aggregate ->
+settle).  Each epoch is subdivided into windows representing the different
+stages within the cycle.
 
-Window phases (80/10/10 split):
-  - evaluation  (block 0 .. T_publish):   run ClawBench, compute local cost EMA
-  - submission  (T_publish):               upload payload to CAS, register pointer
-  - propagation (T_publish .. T_aggregate): wait for submissions to propagate
-  - aggregation (T_aggregate .. end):       read submissions, filter, consensus
+Any validator can independently compute the current epoch number and window --
+no central coordination needed.
+
+Windows within an epoch (80/10/10 split):
+  - evaluation  (block 0 .. T_publish):     run ClawBench, record raw costs
+  - propagation (T_publish .. T_aggregate):  upload payload to CAS, wait for others
+  - aggregation (T_aggregate .. end):        read submissions, filter, consensus
 """
 
 from dataclasses import dataclass
@@ -17,7 +20,6 @@ from enum import Enum
 
 class WindowPhase(str, Enum):
     EVALUATION = "evaluation"
-    SUBMISSION = "submission"
     PROPAGATION = "propagation"
     AGGREGATION = "aggregation"
 

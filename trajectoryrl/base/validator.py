@@ -1194,7 +1194,7 @@ class TrajectoryValidator:
                             )
                         )
 
-                # --- Window phase: submission (idempotent — checks on-chain) ---
+                # --- Propagation window: submit results (idempotent — checks on-chain) ---
                 if (window.phase == WindowPhase.PROPAGATION
                         and not self._check_own_commitment_on_chain(window.window_number)):
                     logger.info(

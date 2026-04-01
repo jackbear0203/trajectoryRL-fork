@@ -410,20 +410,20 @@ Where:
 
 **Example Timeline**:
 ```
-Window 1: Miner A (consensus cost: $5.00, qualified)
+Epoch 1: Miner A (consensus cost: $5.00, qualified)
   → Becomes winner (first qualified miner), winner_cost = $5.00
 
-Window 2: Miner B (consensus cost: $4.80, qualified)
+Epoch 2: Miner B (consensus cost: $4.80, qualified)
   → Rejected! Must beat $5.00 × 0.90 = $4.50
 
-Window 3: Miner C (consensus cost: $3.80, qualified)
+Epoch 3: Miner C (consensus cost: $3.80, qualified)
   → Becomes new winner! ($3.80 < $4.50), winner_cost = $3.80
 
-Window 4: Winner C submits worse pack (consensus cost: $4.20)
+Epoch 4: Winner C submits worse pack (consensus cost: $4.20)
   → C retains winner title, still defends with winner_cost = $3.80
   → Challengers must beat $3.80 × 0.90 = $3.42
 
-Window 5: Winner C submits better pack (consensus cost: $3.30)
+Epoch 5: Winner C submits better pack (consensus cost: $3.30)
   → $3.30 < $3.80 × 0.90 = $3.42 → C self-updates
   → winner_cost updated to $3.30, defense even stronger
 ```
@@ -525,46 +525,56 @@ Winner-take-all creates extreme risk/reward in steady state. The bootstrap phase
 
 ## Evaluation Cadence
 
+An **epoch** is TrajectoryRL's validation cycle — a fixed-length period (measured in chain blocks) that encompasses the full evaluate → submit → aggregate → settle lifecycle. Each epoch is subdivided into three **windows** — evaluation, propagation, and aggregation — representing the different stages within the cycle. Unlike Bittensor's chain-level **tempo** (360 blocks, ~72 min) which governs on-chain weight setting, epochs and their windows are defined by the subnet itself.
+
+```
+Epoch (7200 blocks, ~24h)
+├── Evaluation window    (block 0 → 5760, 80%)    Run ClawBench, record raw costs
+├── Propagation window   (block 5760 → 6480, 10%) Upload to CAS at T_publish, wait for others
+└── Aggregation window   (block 6480 → 7200, 10%) Compute consensus, select winner
+```
+
 Validators run a **continuous evaluation loop** synchronized by chain block height:
 
 | Cadence | Default | Purpose |
 |---------|---------|---------|
-| `eval_interval` | 7200 blocks (~24h at 12s/block) | Evaluation window length, block-aligned |
+| `eval_interval` | 7200 blocks (~24h at 12s/block) | Epoch length, block-aligned |
 | `tempo` | 360 blocks (~72 min, chain-determined) | Set weights on-chain via commit-reveal |
 
 ### Continuous Validator Loop
 
 ```
 while running:
-  1. Sync metagraph, compute current window_number from block height
-     window_number = floor((current_block - global_anchor) / eval_interval)
+  1. Sync metagraph, compute current epoch_number from block height
+     epoch_number = floor((current_block - global_anchor) / eval_interval)
   2. Read on-chain commitments
   3. Pack-hash pre-dedup: group miners by pack_hash, skip evaluation
      for exact copies (only evaluate the first mover per pack_hash)
-  4. Determine window phase from block offset:
+  4. Determine current window from block offset:
      block_offset = (current_block - global_anchor) % eval_interval
 
      If block_offset < T_publish (80%):
-       # Evaluation phase — evaluate marked packs
+       # Evaluation window — evaluate marked packs
        For each miner hotkey with valid commitment:
          - If pack_hash changed since last eval: mark for re-evaluation
-         - If not yet evaluated this window: mark for re-evaluation
+         - If not yet evaluated this epoch: mark for re-evaluation
        For each marked pack:
          a. Phase 1: Pack integrity analysis (LLM judge, cached by pack_hash)
             → If failed: DISQUALIFY, skip episodes
          b. Run full scenario set via ClawBench episodes
          c. Phase 2: Trajectory evaluation (LLM judge, 1 call per scenario)
             → qualification gate + overall score per scenario
-         (rate limit: at most 1 eval per hotkey per window)
+         (rate limit: at most 1 eval per hotkey per epoch)
        Record raw costs + qualification status (no EMA)
 
-     If block_offset = T_publish (80%):
-       # Submission phase — publish evaluation results
+     If T_publish ≤ block_offset < T_aggregate (80%–90%):
+       # Propagation window — publish & wait
        Upload payload to CAS (IPFS → GCS fallback)
        Write pointer on-chain via set_commitment("consensus:v|w|sv|addr")
+       Wait for other validators' submissions to propagate
 
      If block_offset ≥ T_aggregate (90%):
-       # Aggregation phase — compute consensus
+       # Aggregation window — compute consensus
        Read all submissions, filter, stake-weighted aggregation
        Apply Winner Protection, update winner state
 
@@ -575,10 +585,10 @@ while running:
 
 ### Evaluation Rate-Limiting
 
-Evaluation is rate-limited to **at most one evaluation per miner per evaluation window**, regardless of how often the miner updates their on-chain commitment. This is a natural property of the windowed evaluation design — validators evaluate each miner once per window and use the result until the next window.
+Evaluation is rate-limited to **at most one evaluation per miner per epoch**, regardless of how often the miner updates their on-chain commitment. This is a natural property of the epoch-based evaluation design — validators evaluate each miner once per epoch and use the result until the next epoch.
 
-- If a miner submits a new `pack_hash` within the current window, the validator **notes** the new hash but waits for the next window
-- At the next window, the validator evaluates the **latest** `pack_hash` for that miner
+- If a miner submits a new `pack_hash` within the current epoch, the validator **notes** the new hash but waits for the next epoch
+- At the next epoch, the validator evaluates the **latest** `pack_hash` for that miner
 - A miner who submits 100 times per hour gets evaluated exactly the same number of times as one who submits once
 - Each evaluation produces a fresh raw cost (no EMA smoothing)
 
@@ -586,24 +596,21 @@ Evaluation is rate-limited to **at most one evaluation per miner per evaluation 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  Block-Aligned Operation (window_length = 7200 blocks, ~20 tempos/window)    │
+│  Block-Aligned Operation (epoch_length = 7200 blocks, ~20 tempos/epoch)    │
 │                                                                              │
-│  window_number = floor((current_block - global_anchor) / 7200)               │
+│  epoch_number = floor((current_block - global_anchor) / 7200)               │
 │  block_offset  = (current_block - global_anchor) % 7200                      │
 │                                                                              │
-│  ├─ Evaluation phase (block 0 → 5760, 80%):                                 │
-│  │   [Sync] → [Commitments] → [Phase 1] → [Episodes] → [Phase 2] → [Record]│
+│  ├─ Evaluation window (block 0 → 5760, 80%):                                │
+│  │   [Sync] → [Commitments] → [Phase 1] → [Episodes] → [Phase 2] → [Costs] │
 │  │   ~1s      ~1-2 min        ~5s/pack    ~5-30 min    ~10s/scen   ~instant  │
 │  │                             (cached)                 (1 call ea)          │
 │  │                                                                           │
-│  ├─ Submission (block 5760): upload to CAS + on-chain commitment             │
+│  ├─ Propagation window (block 5760 → 6480, 10%):                             │
+│  │   [Upload CAS] → [On-chain commitment] → [Wait for others]               │
 │  │                                                                           │
-│  ├─ Propagation (block 5760 → 6480, 10%): wait for submissions              │
-│  │                                                                           │
-│  ├─ Aggregation (block 6480): compute consensus, update latest_consensus     │
-│  │   [Filter] → [Stake-weighted avg + majority qual] → [Winner Protection]  │
-│  │                                                                           │
-│  └─ Consensus effective (block 6480 → 7200, 10%):                            │
+│  └─ Aggregation window (block 6480 → 7200, 10%):                             │
+│      [Filter] → [Stake-weighted avg + majority qual] → [Winner Protection]  │
 │      set_weights picks up new consensus data at next tempo                   │
 │                                                                              │
 │  Independent cadence — always running:                                       │
@@ -615,7 +622,7 @@ Evaluation is rate-limited to **at most one evaluation per miner per evaluation 
 
 | Setting | Value | Description |
 |---------|-------|-------------|
-| `eval_interval` | 7200 blocks (~24h) | Evaluation window length, block-aligned |
+| `eval_interval` | 7200 blocks (~24h) | Epoch length, block-aligned |
 | `timeout_per_scenario` | 120s (2 min) | Max time per scenario run |
 
 ### Benchmark Stability
@@ -882,7 +889,7 @@ The threshold is tunable via `similarity_threshold` in validator config.
 
 ### The Problem: LLM Non-Determinism
 
-LLM outputs vary between API calls even with the same input and temperature=0. Two independent validators evaluating the same pack may see different agent tool-call sequences, different token counts, and thus different costs and judge outcomes. A single validator's noisy local evaluation may not reflect the true cost of a pack. Without mitigation, validators disagree on costs and winner selection, causing the winner to oscillate between evaluation windows.
+LLM outputs vary between API calls even with the same input and temperature=0. Two independent validators evaluating the same pack may see different agent tool-call sequences, different token counts, and thus different costs and judge outcomes. A single validator's noisy local evaluation may not reflect the true cost of a pack. Without mitigation, validators disagree on costs and winner selection, causing the winner to oscillate between epochs.
 
 ### Solution: Two-Phase Evaluation Consensus + YC3
 
@@ -905,73 +912,71 @@ Layer 2 (on-chain):           YC3 with Liquid Alpha
 
 **Cost** benefits from cross-validator consensus: each validator's raw cost measurement is one noisy estimate of a pack's true cost. Aggregating estimates from multiple validators using stake-weighted averaging produces a more accurate consensus cost. Only costs from validators that voted qualified=True are included — this prevents artificially low costs from fail-fast partial evaluations from skewing the consensus.
 
-### Evaluation Windows
+### Epochs and Windows
 
-All validators operate on synchronized **evaluation windows** derived from chain block height. Any validator can independently compute the current window number — no central coordination needed.
+All validators operate on synchronized **epochs** derived from chain block height. Each epoch is subdivided into **windows** that structure the evaluate → submit → aggregate → settle workflow. Any validator can independently compute the current epoch number and window — no central coordination needed.
 
-**Block-based window computation**:
+**Block-based epoch computation**:
 
 ```
-window_length  = 7200 blocks (~24h at 12s/block)
+epoch_length  = 7200 blocks (~24h at 12s/block)
 global_anchor  = genesis block or a fixed agreed-upon block height
-window_number  = floor((current_block - global_anchor) / window_length)
-window_start   = global_anchor + window_number × window_length
+epoch_number  = floor((current_block - global_anchor) / epoch_length)
+epoch_start   = global_anchor + epoch_number × epoch_length
 ```
 
-Every validator reads `current_block` from the chain and arrives at the same `window_number`. Wall-clock time is never used for window alignment — block height is the single source of truth, ensuring deterministic synchronization regardless of clock drift or timezone differences between validator nodes.
+Every validator reads `current_block` from the chain and arrives at the same `epoch_number`. Wall-clock time is never used for epoch alignment — block height is the single source of truth, ensuring deterministic synchronization regardless of clock drift or timezone differences between validator nodes.
 
-**Window phases** (block offsets relative to `window_start`):
+**Windows within an epoch** (block offsets relative to `epoch_start`):
 
 ```
-Window N (7200 blocks, ~20 tempos)
-├── [block 0 ── 5760]          Independent evaluation phase (80%)
+Epoch N (7200 blocks, ~20 tempos)
+├── Evaluation window [block 0 ── 5760] (80%)
 │   Each validator runs ClawBench episodes, records raw costs + qualified
 │   Submit partial results at T_publish even if not all miners evaluated
-│   set_weights every tempo using latest consensus (Window N-1 or earlier)
+│   set_weights every tempo using latest consensus (Epoch N-1 or earlier)
 │   If no consensus exists yet: set fallback weights
 │
-├── [block 5760]               T_publish — submission deadline (hard)
-│   1. Construct ConsensusPayload (costs, qualified, disqualified, metadata)
-│   2. Upload to CAS concurrently (IPFS + GCS), obtain dual content address
-│   3. Write on-chain commitment: consensus:{version}|{window}|{ipfs_cid};{gcs_url}
-│   Unpublished results are excluded from this window's consensus
-│
-├── [block 5760 ── 6480]       Propagation interval (10%)
+├── Propagation window [block 5760 ── 6480] (10%)
+│   At T_publish (block 5760):
+│     1. Construct ConsensusPayload (costs, qualified, disqualified, metadata)
+│     2. Upload to CAS concurrently (IPFS + GCS), obtain dual content address
+│     3. Write on-chain commitment: consensus:{version}|{epoch}|{ipfs_cid};{gcs_url}
+│   Unpublished results are excluded from this epoch's consensus
 │   Wait for all submissions to propagate through shared storage
 │   set_weights every tempo still using latest consensus (unchanged)
 │
-├── [block 6480]               T_aggregate — consensus aggregation
-│   1. Read all commitments from chain (filter for "consensus:" prefix)
-│   2. Skip commitments with mismatched scoring_version (pre-download)
-│   3. Download valid payloads from CAS
-│   4. Run filter pipeline (protocol → window → stake → integrity → version → scoring → zero-signal)
-│   5. Compute stake-weighted majority qualification per miner
-│   6. Compute stake-weighted consensus cost (qualified votes only)
-│   7. Apply Winner Protection → select winner
-│   8. Store Window N consensus as latest_consensus
-│
-└── [block 6480 ── 7200]       Consensus effective (10%)
-    set_weights every tempo now using Window N consensus data
+└── Aggregation window [block 6480 ── 7200] (10%)
+    At T_aggregate (block 6480):
+      1. Read all commitments from chain (filter for "consensus:" prefix)
+      2. Skip commitments with mismatched scoring_version (pre-download)
+      3. Download valid payloads from CAS
+      4. Run filter pipeline (protocol → epoch → stake → integrity → version → scoring → zero-signal)
+      5. Compute stake-weighted majority qualification per miner
+      6. Compute stake-weighted consensus cost (qualified votes only)
+      7. Apply Winner Protection → select winner
+      8. Store Epoch N consensus as latest_consensus
+    set_weights every tempo now using Epoch N consensus data
 ```
 
-**Relationship between evaluation windows and tempo**: The evaluation window (7200 blocks) and the tempo (360 blocks, chain-determined) are **independent cadences**. Validators call `set_weights` via commit-reveal at **every tempo** regardless of window phase — this is required by the chain to avoid deregistration. The evaluation window only determines **when the consensus data gets updated**:
+**Relationship between epochs, windows, and tempo**: An epoch (7200 blocks, ~24h) and a tempo (360 blocks, ~72 min) are **independent cadences**. The tempo is Bittensor's chain-level cycle for weight setting; the epoch is the subnet's own validation cycle subdivided into windows (evaluation → propagation → aggregation). Validators call `set_weights` via commit-reveal at **every tempo** regardless of which window the epoch is in — this is required by the chain to avoid deregistration. The epoch only determines **when the consensus data gets updated**:
 
 ```
-latest_consensus persists across windows and restarts:
+latest_consensus persists across epochs and restarts:
 
-  Window N-1 T_aggregate → latest_consensus = Window N-1 results
-  Window N   block 0–6480 → still using Window N-1 results
-  Window N   T_aggregate  → latest_consensus = Window N results (overwritten)
-  Window N+1 block 0–6480 → still using Window N results
+  Epoch N-1 T_aggregate → latest_consensus = Epoch N-1 results
+  Epoch N   block 0–6480 → still using Epoch N-1 results
+  Epoch N   T_aggregate  → latest_consensus = Epoch N results (overwritten)
+  Epoch N+1 block 0–6480 → still using Epoch N results
   ...
 
   set_weights(latest_consensus)          (called every 360 blocks, always)
   If no consensus ever computed:         set_fallback_weights()
 ```
 
-A 7200-block window contains ~20 tempos. Validators set weights at every one of them. After T_aggregate, the next `set_weights` call picks up the new consensus data automatically. Between windows, the previous consensus data is retained.
+A 7200-block epoch contains ~20 tempos. Validators set weights at every one of them. After T_aggregate, the next `set_weights` call picks up the new consensus data automatically. Between epochs, the previous consensus data is retained.
 
-**Timing rationale**: 80/10/10 split gives validators ~19.2 hours for evaluation (sufficient for multi-hour runs across many miners), ~2.4 hours for propagation (ample for IPFS propagation and on-chain commitment finality), and ~2.4 hours for aggregation before the next window starts. The propagation interval must exceed max expected network latency + max storage write latency.
+**Timing rationale**: The 80/10/10 window split gives validators ~19.2 hours for the evaluation window (sufficient for multi-hour runs across many miners), ~2.4 hours for the propagation window (submission + wait, ample for IPFS propagation and on-chain commitment finality), and ~2.4 hours for the aggregation window before the next epoch starts. The propagation interval must exceed max expected network latency + max storage write latency.
 
 **Partial submission**: If a validator has not finished evaluating all miners by T_publish, it submits results for the miners it has completed. The consensus aggregation handles partial coverage — a miner's consensus cost is computed from whichever validators have data for that miner.
 
@@ -982,11 +987,11 @@ Evaluation payloads are too large for direct on-chain storage.
 **Solution**: Two-layer storage with on-chain pointer registration.
 
 1. **Content-Addressed Storage (CAS)**: Upload the full evaluation payload. IPFS is the primary backend; `trajrl.com` acts as a GCS proxy fallback (stores payload to GCS, returns a public URL). The content address (IPFS CID or sha256 hash) serves as an integrity proof.
-2. **On-chain pointer**: Write a lightweight commitment via `subtensor.set_commitment()` with format: `consensus:{protocol_version}|{window_number}|{scoring_version}|{content_address}`.
+2. **On-chain pointer**: Write a lightweight commitment via `subtensor.set_commitment()` with format: `consensus:{protocol_version}|{epoch_number}|{scoring_version}|{content_address}`.
 
 Validator consensus commitments share the same commitment channel as miner pack commitments (`pack_hash|pack_url`). They are distinguished by the `consensus:` prefix. During aggregation, each validator reads `get_all_commitments(netuid)` and filters for entries starting with `consensus:`. Commitments with a mismatched `scoring_version` are skipped before CAS download.
 
-**Backward compatibility**: Old-format commitments (`consensus:{pv}|{window}|{content_address}`, 3 fields) are parsed with `scoring_version` defaulting to 1.
+**Backward compatibility**: Old-format commitments (`consensus:{pv}|{epoch}|{content_address}`, 3 fields) are parsed with `scoring_version` defaulting to 1.
 
 **Verification**: Any validator can independently verify a submission: read on-chain pointer → decode dual-address → download payload from CAS (try IPFS, fall back to GCS) → verify content hash matches.
 
@@ -1006,8 +1011,8 @@ All submissions from on-chain commitments
   ├─ [1] Protocol version filter
   │   Discard submissions with mismatched protocol version
   │
-  ├─ [2] Window number filter
-  │   Discard submissions from a different evaluation window
+  ├─ [2] Epoch number filter
+  │   Discard submissions from a different epoch
   │
   ├─ [3] Trust threshold filter
   │   Discard submissions from validators below minimum stake threshold
@@ -1054,7 +1059,7 @@ consensus_cost[miner] = Σ(stake_i × cost_i) / Σ(stake_i)
 
 Costs from not-qualified votes are excluded because fail-fast evaluation may produce artificially low costs from incomplete scenario runs. If a validator marked a miner as not-qualified (e.g., failed on the first scenario), the partial cost from that incomplete evaluation is not trustworthy and must not influence the consensus cost.
 
-**Fallback**: When all submissions are filtered out (e.g., storage outage across all validators), the consensus costs from the previous window are retained. If no consensus has ever been computed, fallback weights are set (owner UID burn).
+**Fallback**: When all submissions are filtered out (e.g., storage outage across all validators), the consensus costs from the previous epoch are retained. If no consensus has ever been computed, fallback weights are set (owner UID burn).
 
 ### Winner Protection
 
@@ -1080,9 +1085,9 @@ If winner exists and is qualified:
 - Self-update follows the same 10% rule — winner must beat their own winning cost by 10% to update their record
 - No automatic season reset — winner persists until beaten or disqualified. Manual reset available for operational control.
 
-**Validator local state** (`WinnerState`): Each validator persists `winner_hotkey`, `winner_pack_hash`, `winner_cost`, and `scoring_version` to a local JSON file. When `SCORING_VERSION` changes (new scenario set), the winner state resets automatically. Since all validators process the same consensus data with the same deterministic algorithm, they converge on the same winner as long as they participate in each window.
+**Validator local state** (`WinnerState`): Each validator persists `winner_hotkey`, `winner_pack_hash`, `winner_cost`, and `scoring_version` to a local JSON file. When `SCORING_VERSION` changes (new scenario set), the winner state resets automatically. Since all validators process the same consensus data with the same deterministic algorithm, they converge on the same winner as long as they participate in each epoch.
 
-**Rate-limiting**: At most one evaluation per miner per `eval_interval`, regardless of how often the miner updates their commitment. Rapid commitment churn has no effect — validators note the latest `pack_hash` but only evaluate once per window (see [Evaluation Cadence](#evaluation-cadence)).
+**Rate-limiting**: At most one evaluation per miner per `eval_interval`, regardless of how often the miner updates their commitment. Rapid commitment churn has no effect — validators note the latest `pack_hash` but only evaluate once per epoch (see [Evaluation Cadence](#evaluation-cadence)).
 
 Raw costs are submitted directly in the `ConsensusPayload` at T_publish. Weight setting always uses consensus costs (stake-weighted averages from all validators). Before the first consensus aggregation completes, the validator sets fallback weights.
 
@@ -1090,11 +1095,11 @@ Raw costs are submitted directly in the `ConsensusPayload` at T_publish. Weight 
 
 | Scenario | Behavior |
 |----------|----------|
-| **CAS upload failure** | Validator skips submission for this window; continues using previous window's consensus costs for weight setting. Logged as degraded state. |
+| **CAS upload failure** | Validator skips submission for this epoch; continues using previous epoch's consensus costs for weight setting. Logged as degraded state. |
 | **CAS download failure** (aggregation) | Skip that validator's submission; aggregate from the remaining valid subset. Log failure statistics. |
-| **Zero valid submissions** | Previous window's consensus costs are retained for weight setting. If no consensus has ever been computed, fallback weights are set. |
-| **Late evaluator** (missed T_publish) | Do not submit this window. Still read other validators' consensus at T_aggregate and adopt their consensus result for own weight setting. Allows low-stake validators to "free-ride" on high-stake evaluators. |
-| **Mid-window restart** | Compute elapsed window fraction. If > skip threshold (default 30%), skip to next window boundary. Otherwise resume or restart evaluation. Consensus costs are loaded from persisted state. |
+| **Zero valid submissions** | Previous epoch's consensus costs are retained for weight setting. If no consensus has ever been computed, fallback weights are set. |
+| **Late evaluator** (missed T_publish) | Do not submit this epoch. Still read other validators' consensus at T_aggregate and adopt their consensus result for own weight setting. Allows low-stake validators to "free-ride" on high-stake evaluators. |
+| **Mid-epoch restart** | Compute elapsed epoch fraction. If > skip threshold (default 30%), skip to next epoch boundary. Otherwise resume or restart evaluation. Consensus costs are loaded from persisted state. |
 
 ### Cross-Validator: YC3 On-Chain Consensus
 
@@ -1104,7 +1109,7 @@ With the off-chain consensus layer, validators converge on costs **before** sett
 
 - **Per-bond EMA**: Each validator-miner bond pair evolves at its own rate.
 - **Liquid Alpha**: Rewards validators who identify promising miners early.
-- **Residual disagreement**: If a validator missed consensus aggregation (e.g., storage degraded, late start), it retains the previous window's consensus data and its weights may lag behind. YC3 bond dynamics naturally down-weight the outlier.
+- **Residual disagreement**: If a validator missed consensus aggregation (e.g., storage degraded, late start), it retains the previous epoch's consensus data and its weights may lag behind. YC3 bond dynamics naturally down-weight the outlier.
 
 ```
 on_chain_weight[miner] = YC3(
@@ -1197,9 +1202,9 @@ A miner's submission can fail at multiple points in the validation pipeline. The
 ### Evaluation Pipeline
 
 ```
-# Per validator, per evaluation window:
+# Per validator, per epoch:
 
-# ── Independent evaluation (0% → T_publish) ──
+# ── Evaluation window (0% → 80%) ──
 
 # Phase 1: Pack integrity (1 LLM call per pack_hash, cached)
 integrity[hotkey]           = llm_judge_integrity(pack_files)     # bool
@@ -1216,17 +1221,17 @@ raw_cost[hotkey][scenario]  = measured cost from episode
 local_cost[hotkey]          = weighted_mean(raw_cost_scenarios)
 fully_qualified[hotkey]     = integrity[hotkey] AND qualified on ALL scenarios
 
-# ── Submission (T_publish) ──
+# ── Propagation window (80% → 90%) ──
 
 payload = { local_cost, qualified, clawbench_version, disqualified, metadata }
 content_address = cas_upload(payload)        # IPFS primary, GCS proxy fallback
-subtensor.set_commitment("consensus:{version}|{window}|{scoring_version}|{content_address}")
+subtensor.set_commitment("consensus:{version}|{epoch}|{scoring_version}|{content_address}")
 
-# ── Consensus aggregation (T_aggregate) ──
+# ── Aggregation window (90% → 100%) ──
 
 submissions = subtensor.get_all_commitments()  # filter for "consensus:" prefix
 # skip mismatched scoring_version before CAS download
-valid = filter_pipeline(submissions)        # protocol → window → stake → integrity → version → scoring → zero-signal
+valid = filter_pipeline(submissions)        # protocol → epoch → stake → integrity → version → scoring → zero-signal
 consensus_qualified[hotkey] = qualified_stake / total_stake > 0.50  # stake-weighted majority (all reporters)
 consensus_cost[hotkey] = Σ(stake_i × cost_i) / Σ(stake_i)         # qualified votes only
 
@@ -1237,7 +1242,7 @@ winner = select_winner(consensus_cost, consensus_qualified, winner_state, cost_d
 # ── Weight setting (hotkey → UID via metagraph, every tempo) ──
 
 weight[uid] = f(consensus_cost, consensus_qualified, winner)
-# consensus data persists across windows
+# consensus data persists across epochs
 # Before first consensus: set_fallback_weights()
 
 # ── Cross-validator (YC3 on-chain) ──
@@ -1286,10 +1291,10 @@ Bootstrap:     top-3 qualified get 70/20/10 of miner alpha emissions
 | qualification_stake_threshold | 0.50 (>50% stake majority) | Yes |
 | Required categories | safety, correctness | Yes |
 | eval_interval | 7200 blocks (~24h at 12s/block) | Yes |
-| T_publish (submission deadline) | 80% of window (block 5760) | Yes |
-| T_aggregate (aggregation start) | 90% of window (block 6480) | Yes |
+| T_publish (propagation window start) | 80% of epoch (block 5760) | Yes |
+| T_aggregate (aggregation window start) | 90% of epoch (block 6480) | Yes |
 | min_validator_stake | minimum stake for consensus participation | Yes |
-| window_skip_threshold | 0.30 (30% of window elapsed) | Yes |
+| epoch_skip_threshold | 0.30 (30% of epoch elapsed) | Yes |
 | Scenario pool | 7 (all run every eval; pool grows over time) | Yes |
 | Scenario weights | 1.0-1.5 per YAML | Yes |
 | Bootstrap threshold | 10 active miners | Yes |
