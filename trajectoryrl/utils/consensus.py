@@ -16,7 +16,7 @@ CONSENSUS_PROTOCOL_VERSION = 1
 # Bump this whenever scenarios are added/removed or scoring semantics change
 # so that results from different versions are never mixed during aggregation,
 # cached-result lookup, or winner selection.
-SCORING_VERSION = 1
+SCORING_VERSION = 2
 
 
 @dataclass
