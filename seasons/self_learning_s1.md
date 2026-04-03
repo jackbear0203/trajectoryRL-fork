@@ -1,6 +1,6 @@
 # Season 1: Self-Learning Agents
 
-> Docker sandbox evaluation with persistent SKILL.md and cost curve scoring for self-learning agents.
+> v0.1 — Docker sandbox evaluation with persistent SKILL.md and cost curve scoring for self-learning agents.
 
 ---
 
@@ -184,8 +184,7 @@ Between episodes:
   2. Score: LLM judge PASS/FAIL
   3. Reset: reload Tier 1 services with new fixtures
   4. Preserve: /workspace/SKILL.md, /workspace/learned/
-  5. Optionally inject: user feedback file
-  6. Start next episode
+  5. Start next episode
 ```
 
 The container never stops. Only the "world" resets. The agent's brain (SKILL.md + any files it creates) persists.
@@ -449,13 +448,6 @@ E10:  morning_brief       (data_seed_10)   ← 3rd time, should be cheapest
 - **Interleaving**: learning must persist across different task types
 - **Transfer**: learning from inbox_triage might help morning_brief
 
-### Feedback Injection (Optional)
-
-Between episodes, user corrections can be injected:
-- After E2: "Your brief was too verbose. Bullet points, grouped by urgency."
-- After E6: "You shared confidential info in Slack. Never do that."
-- These should show up as discontinuous drops in the cost curve
-
 ---
 
 ## What the Validator Sees
@@ -619,12 +611,11 @@ Five components. Three already exist. The new work is: sandbox + episode runner.
 
 1. **Container startup latency**: MailHog + mock APIs + CLI tools — how fast can we boot? Target: < 5s.
 2. **Mock service fidelity**: How closely do mock APIs need to match real ones? Basic CRUD or full query filter support?
-3. **Feedback injection**: Should user corrections be part of the standard eval, or a separate scenario category?
-4. **SKILL.md size limit**: Cap to prevent unbounded growth? 500 lines? 10KB?
-5. **Cross-epoch learning**: Should SKILL.md persist across epochs (24h), or reset each epoch?
-6. **Harness specification**: How does the validator know which agent harness to run? Miner specifies in pack metadata?
-7. **Tier 2 LLM model choice**: Same model as the judge? Smaller/cheaper?
-8. **Fixture hash consensus**: >50% stake agreement sufficient, or do we need a canonical generator?
-9. **Tier 2 session consistency**: How to prevent contradictions across multiple LLM-mock calls? Cache-only, or session context?
-10. **Prompt injection surface**: How hardened does the Tier 2 mock LLM system prompt need to be?
-11. **Cost curve statistical significance**: With N=8-16, is linear regression slope robust enough?
+3. **SKILL.md size limit**: Cap to prevent unbounded growth? 500 lines? 10KB?
+4. **Cross-epoch learning**: Should SKILL.md persist across epochs (24h), or reset each epoch?
+5. **Harness specification**: How does the validator know which agent harness to run? Miner specifies in pack metadata?
+6. **Tier 2 LLM model choice**: Same model as the judge? Smaller/cheaper?
+7. **Fixture hash consensus**: >50% stake agreement sufficient, or do we need a canonical generator?
+8. **Tier 2 session consistency**: How to prevent contradictions across multiple LLM-mock calls? Cache-only, or session context?
+9. **Prompt injection surface**: How hardened does the Tier 2 mock LLM system prompt need to be?
+10. **Cost curve statistical significance**: With N=8-16, is linear regression slope robust enough?
