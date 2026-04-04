@@ -1967,7 +1967,7 @@ class TrajectoryValidator:
             return None
 
         # Step 3: Phase 1 — LLM pack integrity analysis (cached by pack_hash)
-        integrity = self.integrity_judge.check_integrity(
+        integrity = await self.integrity_judge.check_integrity(
             pack, pack_hash=commitment.pack_hash
         )
         if not integrity.passed:
@@ -2063,7 +2063,7 @@ class TrajectoryValidator:
                 # Phase 2: LLM trajectory judge
                 scenario_config = self.scenarios.get(scenario_name, {})
                 trajectory = result.trajectory or []
-                judge_result = self.trajectory_judge.evaluate(
+                judge_result = await self.trajectory_judge.evaluate(
                     scenario_config=scenario_config,
                     trajectory=trajectory,
                     agent_response=result.response,

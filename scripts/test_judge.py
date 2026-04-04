@@ -184,7 +184,8 @@ def main():
     print("CALLING LLM JUDGE...")
     print("=" * 80)
 
-    result = judge.evaluate(scenario_config, trajectory, agent_response)
+    import asyncio
+    result = asyncio.run(judge.evaluate(scenario_config, trajectory, agent_response))
     print_results(result)
 
 

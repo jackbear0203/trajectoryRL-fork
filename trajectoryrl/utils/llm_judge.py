@@ -19,7 +19,7 @@ from .judge_prompts import (
     TRAJECTORY_JUDGE_SYSTEM,
     TRAJECTORY_JUDGE_USER,
 )
-from .llm_client import generate
+from .llm_client import async_generate
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ class PackIntegrityJudge:
         self.max_tokens = max_tokens
         self._cache: Dict[str, IntegrityResult] = {}
 
-    def check_integrity(
+    async def check_integrity(
         self,
         pack: dict,
         pack_hash: str = "",
@@ -129,7 +129,7 @@ class PackIntegrityJudge:
             logger.info("Pack integrity cache hit: %s", pack_hash[:12])
             return self._cache[pack_hash]
 
-        result = self._run_integrity_check(pack)
+        result = await self._run_integrity_check(pack)
         # Only cache deterministic results from actual LLM evaluation.
         # Transient errors (API timeout, connection refused, etc.) should
         # not poison the cache — the next eval cycle should retry.
@@ -137,7 +137,7 @@ class PackIntegrityJudge:
             self._cache[pack_hash] = result
         return result
 
-    def _run_integrity_check(self, pack: dict) -> IntegrityResult:
+    async def _run_integrity_check(self, pack: dict) -> IntegrityResult:
         """Run the LLM integrity check."""
         try:
             # Format pack files for the prompt
@@ -160,7 +160,7 @@ class PackIntegrityJudge:
                 tool_deny=tool_deny or "(none)",
             )
 
-            raw = generate(
+            raw = await async_generate(
                 model=self.model,
                 system=PACK_INTEGRITY_SYSTEM,
                 user_message=user_msg,
@@ -297,7 +297,7 @@ class TrajectoryJudge:
         self.base_url = base_url
         self.max_tokens = max_tokens
 
-    def evaluate(
+    async def evaluate(
         self,
         scenario_config: dict,
         trajectory: List[dict],
@@ -334,7 +334,7 @@ class TrajectoryJudge:
                 scenario_config, trajectory, agent_response, criteria
             )
 
-            raw = generate(
+            raw = await async_generate(
                 model=self.model,
                 system=TRAJECTORY_JUDGE_SYSTEM,
                 user_message=user_msg,

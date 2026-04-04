@@ -175,7 +175,7 @@ async def evaluate_single_miner(
                 with open(scenario_yaml) as f:
                     scenario_config = yaml.safe_load(f)
                 trajectory = result.trajectory or []
-                judge_result = judge.evaluate(
+                judge_result = await judge.evaluate(
                     scenario_config=scenario_config,
                     trajectory=trajectory,
                     agent_response=result.response,

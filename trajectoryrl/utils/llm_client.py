@@ -11,6 +11,8 @@ For Anthropic models, the native SDK is used instead of the OpenAI
 compatibility layer.
 """
 
+import asyncio
+import functools
 import logging
 import os
 from typing import Optional
@@ -40,7 +42,7 @@ def has_api_key() -> bool:
     return bool(os.environ.get("CLAWBENCH_LLM_API_KEY"))
 
 
-def generate(
+def _generate(
     model: str = "",
     system: str = "",
     user_message: str = "",
@@ -49,22 +51,12 @@ def generate(
     base_url: str = "",
     temperature: Optional[float] = None,
 ) -> str:
-    """Generate text using an OpenAI-compatible LLM endpoint.
+    """Synchronous LLM generation (internal).
 
-    Args:
-        model: Model name (e.g. ``glm-5``). Falls back to ``CLAWBENCH_DEFAULT_MODEL`` env var.
-        system: System prompt.
-        user_message: User message.
-        max_tokens: Maximum tokens in the response.
-        api_key: Explicit API key (overrides ``LLM_API_KEY`` env var).
-        base_url: Explicit base URL (overrides ``LLM_BASE_URL`` env var).
-        temperature: Sampling temperature. Use 0 for deterministic output.
-
-    Returns:
-        Generated text content.
+    Prefer ``async_generate`` in async contexts — this function blocks
+    the calling thread until the HTTP request completes.
     """
     model = model or os.environ.get("CLAWBENCH_DEFAULT_MODEL", "glm-5")
-    # Strip provider prefix (e.g. "zhipu/glm-5" -> "glm-5")
     if "/" in model:
         model = model.split("/", 1)[1]
     key = resolve_api_key(api_key)
@@ -75,6 +67,43 @@ def generate(
     logger.info("LLM generate: model=%s, base_url=%s", model, url)
 
     return _generate_openai_compat(model, system, user_message, max_tokens, key, url, temperature=temperature)
+
+
+LLM_CALL_TIMEOUT = 180  # seconds; prevents a single hung LLM call from
+                        # blocking the async event loop indefinitely.
+
+
+async def async_generate(
+    model: str = "",
+    system: str = "",
+    user_message: str = "",
+    max_tokens: int = 8192,
+    api_key: str = "",
+    base_url: str = "",
+    temperature: Optional[float] = None,
+    timeout: float = LLM_CALL_TIMEOUT,
+) -> str:
+    """Generate text using an OpenAI-compatible LLM endpoint (async).
+
+    Runs the synchronous OpenAI call in a thread-pool executor so it
+    does not block the asyncio event loop, and applies an explicit
+    timeout to prevent hung API calls from stalling the validator.
+    """
+    loop = asyncio.get_running_loop()
+    func = functools.partial(
+        _generate,
+        model=model,
+        system=system,
+        user_message=user_message,
+        max_tokens=max_tokens,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=temperature,
+    )
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, func),
+        timeout=timeout,
+    )
 
 
 def _generate_openai_compat(

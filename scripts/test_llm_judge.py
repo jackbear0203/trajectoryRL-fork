@@ -282,7 +282,7 @@ def _strip_provider_prefix(model: str) -> str:
     return model
 
 
-def test_phase1():
+async def test_phase1():
     """Test Phase 1: Pack integrity analysis."""
     model = _strip_provider_prefix(
         os.getenv("JUDGE_MODEL") or os.getenv("CLAWBENCH_DEFAULT_MODEL", "")
@@ -300,7 +300,7 @@ def test_phase1():
     print("\n" + "=" * 60)
     print("PHASE 1: Pack Integrity — BAD PACK (gaming)")
     print("=" * 60)
-    result = judge.check_integrity(BAD_PACK, pack_hash="test_bad_pack")
+    result = await judge.check_integrity(BAD_PACK, pack_hash="test_bad_pack")
     print(f"  Passed: {result.passed}")
     print(f"  Summary: {result.summary}")
     for f in result.flags:
@@ -314,7 +314,7 @@ def test_phase1():
     print("\n" + "=" * 60)
     print("PHASE 1: Pack Integrity — GOOD PACK (legitimate)")
     print("=" * 60)
-    result = judge.check_integrity(GOOD_PACK, pack_hash="test_good_pack")
+    result = await judge.check_integrity(GOOD_PACK, pack_hash="test_good_pack")
     print(f"  Passed: {result.passed}")
     print(f"  Summary: {result.summary}")
     for f in result.flags:
@@ -328,7 +328,7 @@ def test_phase1():
     print("\n" + "=" * 60)
     print("PHASE 1: Pack Integrity — FIXTURE EXPLOIT (UID-165-style)")
     print("=" * 60)
-    result = judge.check_integrity(FIXTURE_EXPLOIT_PACK, pack_hash="test_fixture_exploit")
+    result = await judge.check_integrity(FIXTURE_EXPLOIT_PACK, pack_hash="test_fixture_exploit")
     print(f"  Passed: {result.passed}")
     print(f"  Summary: {result.summary}")
     for f in result.flags:
@@ -341,7 +341,7 @@ def test_phase1():
     return bad_ok and good_ok and fixture_ok
 
 
-def test_phase2():
+async def test_phase2():
     """Test Phase 2: Trajectory judge."""
     model = _strip_provider_prefix(
         os.getenv("JUDGE_MODEL") or os.getenv("CLAWBENCH_DEFAULT_MODEL", "")
@@ -367,7 +367,7 @@ def test_phase2():
     print("\n" + "=" * 60)
     print("PHASE 2: Trajectory Judge — BAD (zero tool calls, canned)")
     print("=" * 60)
-    result = judge.evaluate(scenario, BAD_TRAJECTORY, BAD_RESPONSE)
+    result = await judge.evaluate(scenario, BAD_TRAJECTORY, BAD_RESPONSE)
     print(f"  Gate: {'PASS' if result.qualification_gate else 'FAIL'}")
     print(f"  Score: {result.overall_score:.3f}")
     print(f"  Safety: {'PASS' if result.safety_passed else 'FAIL'}")
@@ -384,7 +384,7 @@ def test_phase2():
     print("\n" + "=" * 60)
     print("PHASE 2: Trajectory Judge — GOOD (real tool calls, grounded)")
     print("=" * 60)
-    result = judge.evaluate(scenario, GOOD_TRAJECTORY, GOOD_RESPONSE)
+    result = await judge.evaluate(scenario, GOOD_TRAJECTORY, GOOD_RESPONSE)
     print(f"  Gate: {'PASS' if result.qualification_gate else 'FAIL'}")
     print(f"  Score: {result.overall_score:.3f}")
     print(f"  Safety: {'PASS' if result.safety_passed else 'FAIL'}")
@@ -400,9 +400,9 @@ def test_phase2():
     return bad_ok and good_ok
 
 
-if __name__ == "__main__":
-    p1 = test_phase1()
-    p2 = test_phase2()
+async def _main():
+    p1 = await test_phase1()
+    p2 = await test_phase2()
 
     print("\n" + "=" * 60)
     print("RESULTS")
@@ -416,3 +416,8 @@ if __name__ == "__main__":
     else:
         print("\n  Some tests failed.")
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(_main())
