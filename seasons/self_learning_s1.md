@@ -113,7 +113,7 @@ v2: Agent → SSH/exec into Docker → real shell → real (mock) services → s
 
 ### What Changes
 
-**No exec god-function.** The agent runs real commands in a real shell. `himalaya envelope list`, `curl localhost:1080/api/v2/messages`, `python3 -c "import imaplib; ..."` — all valid, all produce real results.
+**No exec god-function.** The agent runs real commands in a real shell. `curl localhost:1080/api/v2/messages`, `python3 -c "import imaplib; ..."`, raw `telnet localhost 1025` — all valid, all produce real results.
 
 **Stateful by default.** Agent sends email → it appears in the mock SMTP server's mailbox. Scoring inspects the final state of the environment, not the commands used.
 
@@ -135,7 +135,7 @@ The sandbox requires **no framework-specific tools**. Every agent framework — 
 | **Filesystem** (read/write/edit) | Persist data, read configs | SKILL.md, workspace files, code repos |
 | **HTTP** (localhost services) | Talk to mock services | Any HTTP client speaks the same protocol |
 
-The agent doesn't need `himalaya` to send email — it can use `curl localhost:1080/api/v2/messages`, `python3 -c "import smtplib; ..."`, or any method. The mock services expose **standard protocols**, not framework-specific APIs.
+Any method that speaks the protocol works: `curl localhost:1080/api/v2/messages`, `python3 -c "import smtplib; ..."`, or raw socket connections. The mock services expose **standard protocols**, not framework-specific APIs.
 
 ```
 Docker Container ("eval sandbox")
@@ -153,7 +153,6 @@ Docker Container ("eval sandbox")
 │
 ├── Standard Tools (pre-installed, all optional — agent can use any method)
 │   ├── curl, jq, python3, git, node — universal
-│   ├── himalaya, gh — convenience CLIs (not required)
 │   └── ~/.config/ pre-configured to point at local mock services
 │
 ├── Workspace
