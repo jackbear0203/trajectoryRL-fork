@@ -125,22 +125,35 @@ v2: Agent → SSH/exec into Docker → real shell → real (mock) services → s
 
 ## Sandbox Container Architecture
 
+### Universal Interface: Shell + Filesystem + HTTP
+
+The sandbox requires **no framework-specific tools**. Every agent framework — Claude Code, Cursor, Hermes, OpenClaw, or a custom harness — has access to the same three primitives:
+
+| Primitive | What it does | How agents use it |
+|-----------|-------------|-------------------|
+| **Shell** (bash via SSH/exec) | Run any command | `curl`, `git`, `python3`, pipe commands, etc. |
+| **Filesystem** (read/write/edit) | Persist data, read configs | SKILL.md, workspace files, code repos |
+| **HTTP** (localhost services) | Talk to mock services | Any HTTP client speaks the same protocol |
+
+The agent doesn't need `himalaya` to send email — it can use `curl localhost:1080/api/v2/messages`, `python3 -c "import smtplib; ..."`, or any method. The mock services expose **standard protocols**, not framework-specific APIs.
+
 ```
 Docker Container ("eval sandbox")
-├── Tier 1: Deterministic Mock Services (stateful, real protocols)
+├── Tier 1: Deterministic Mock Services (stateful, standard protocols)
 │   ├── MailHog/MailPit       (SMTP :1025, HTTP API :1080) — email
 │   ├── Mock Notion API       (HTTP :8080) — tasks / databases
 │   ├── Mock Calendar API     (CalDAV :5232 or HTTP :8081)
 │   ├── Mock Slack API        (HTTP :8082) — channels, messages
-│   └── Mock GitHub / Gitea   (HTTP :3000) — repos, PRs, issues
+│   └── Gitea                 (HTTP :3000, git SSH :2222) — repos, PRs, issues
 │
 ├── Tier 2: LLM-Backed Runtime Mocks (read-only, on-the-fly generation)
 │   ├── Web search/fetch proxy (HTTP :8083) — LLM generates search results & pages
 │   └── Memory service         (HTTP :8084) — LLM generates memory entries
 │   (Requires outbound access to LLM API only — all other egress blocked)
 │
-├── CLI Tools (pre-installed)
-│   ├── himalaya, gh, curl, jq, python3, git, etc.
+├── Standard Tools (pre-installed, all optional — agent can use any method)
+│   ├── curl, jq, python3, git, node — universal
+│   ├── himalaya, gh — convenience CLIs (not required)
 │   └── ~/.config/ pre-configured to point at local mock services
 │
 ├── Workspace
@@ -160,6 +173,8 @@ Docker Container ("eval sandbox")
     ├── CPU / memory / disk limits
     └── Hard timeout per episode
 ```
+
+**Key point:** The sandbox is tool-agnostic. It doesn't know or care which agent framework is running. It exposes standard protocols and inspects final state. A Claude Code agent using `bash` and a custom Python harness using `requests` are evaluated identically.
 
 ### Sandbox Lifecycle
 
