@@ -611,13 +611,13 @@ A miner whose SKILL.md produces high-quality trajectories from episode 1 shows n
 
 ### 6. Miner meta-game evolution
 
-**Month 1-2:** Basic SKILL.md files ("reflect after each task, write to learned/"). Low differentiation. Most miners produce similar quality trajectories.
+**Week 1-2:** Basic SKILL.md files ("reflect after each task, write to learned/"). Low differentiation. Most miners produce similar quality trajectories.
 
-**Month 3-4:** Top miners discover that SKILL.md instruction quality matters — better memory management strategies, smarter pruning rules, domain-specific heuristics. Separation emerges.
+**Week 3-4:** Top miners discover that SKILL.md instruction quality matters — better memory management strategies, smarter pruning rules, domain-specific heuristics. Separation emerges.
 
-**Long-term:** Competition converges on optimal memory management strategies. The eval must add new scenario types (Phase 6) to maintain competitive pressure.
+**Week 5-8:** Competition converges on optimal strategies. Meta stabilizes.
 
-**Mitigation:** The season model is designed for this — Season 1 runs until the meta stabilizes, then Season 2 introduces new scenario categories and evaluation dimensions.
+**Mitigation:** Season 1 is designed to run 1-2 months. When the meta stabilizes, Season 2 introduces new scenario categories and evaluation dimensions. Short seasons keep competitive pressure high.
 
 ---
 
