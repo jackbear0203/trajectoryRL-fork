@@ -40,11 +40,10 @@ Run a sequence of tasks, judge each trajectory, score the trend. The same LLM ju
 
    Miners compete on which agent framework learns best, not which prompt is cleverest. A miner running Claude Code competes directly against a miner running a custom Python harness.
 
-3. **Resistant to gaming.** A single scenario result can be hacked. A consistent upward quality trend across N episodes cannot, because:
-   - Task order is **permuted** each epoch
-   - Episode count **varies** each epoch
-   - Data is **different** each episode
-   - Task types are **interleaved** (learning must transfer)
+3. **Resistant to gaming.** A single scenario result can be hacked. A consistent upward quality trend across 4-8 repetitions of the same scenario cannot, because:
+   - Episode count **varies** each epoch (N=8-16)
+   - Data is **different** each attempt (same template, new content)
+   - Two scenario domains prevent single-task overfitting
 
 The only viable strategy is to build an agent that genuinely learns.
 
@@ -354,12 +353,17 @@ The learning signal is whether quality scores improve over episodes:
 No separate gate. A bad episode scores low (e.g. 0.1) and drags down `mean(quality)`. The formula handles it naturally — no binary disqualification needed.
 
 ```
-episode_scores = [judge_quality(trajectory_i) for i in 1..N]
-learning_rate  = linear_regression_slope(episode_scores)
-final_score    = mean(episode_scores) * (1 + max(0, learning_rate))
+# Per-scenario learning curves (4-8 data points each — statistically meaningful)
+for scenario in scenarios:
+    scores = [judge_quality(ep) for ep in episodes if ep.scenario == scenario]
+    learning_rate[scenario] = linear_regression_slope(scores)
+
+overall_learning = mean(learning_rate.values())
+overall_quality  = mean(all_episode_scores)
+final_score      = overall_quality * (1 + max(0, overall_learning))
 ```
 
-High quality AND improving = win.
+Per-scenario regression over 4-8 repetitions. High quality AND improving = win.
 
 ---
 
@@ -369,8 +373,8 @@ High quality AND improving = win.
 1. Build sandbox (mock services + CLI tools)
 2. Load miner's SKILL.md into /workspace/
 3. Derive sequence from epoch_seed:
-   - N = rng.randint(8, 16)            ← variable length
-   - sequence = rng.sample(pool, N)    ← permuted order
+   - N = rng.randint(8, 16)                        ← variable length
+   - sequence = interleave(2 scenarios, N)          ← 4-8 reps each
 4. For episode i = 1..N:
    a. Reset mock service data (new Tier 3 fixtures from epoch_seed + i)
    b. Deliver task prompt: sequence[i]
@@ -379,7 +383,8 @@ High quality AND improving = win.
    e. Judge: LLM evaluates trajectory → quality score (0.0–1.0)
 5. Tear down sandbox
 6. Score:
-   - final_score = mean(quality_scores) * (1 + learning_rate)
+   - Per-scenario learning curves (regression slope over 4-8 reps)
+   - final_score = mean(quality) * (1 + mean(learning_rates))
 ```
 
 One scoring mechanism, one formula. No gates, no thresholds.
@@ -388,54 +393,61 @@ One scoring mechanism, one formula. No gates, no thresholds.
 
 ## Episode Sequence Design
 
-### Permuted Order + Variable Length
+### Few Scenarios, Many Repetitions
 
-The episode sequence is **shuffled from `epoch_seed`** and the episode count **varies**. A miner cannot predict what task comes at which position, or how many episodes there will be.
+Instead of spreading N episodes across 7 scenario types (~2 repetitions each, weak signal), use **2 deep scenarios repeated 4-8 times each** (strong signal).
 
 ```python
 rng = Random(epoch_seed)
 
-# Variable episode count: 8-16
-task_pool = scenarios * 2  # each scenario appears ~2x
+scenarios = ["client_escalation", "code_bug_fix"]   # 2 deep scenarios
 N = rng.randint(8, 16)
-sequence = rng.sample(task_pool, N)
+sequence = [rng.choice(scenarios) for _ in range(N)]
+rng.shuffle(sequence)
 
-# Each episode gets unique data
+# Each episode gets unique data from the same scenario template
 for i, scenario in enumerate(sequence):
     fixtures = generate(epoch_seed + i, scenario)
 ```
 
-**Example: Epoch A might produce (N=10):**
+**Example: Epoch A (N=10):**
 
 ```
- E1:  client_escalation   (data_seed_1)
- E2:  morning_brief       (data_seed_2)
- E3:  inbox_triage        (data_seed_3)
- E4:  team_standup        (data_seed_4)
- E5:  morning_brief       (data_seed_5)    ← 2nd time, should improve
- E6:  client_escalation   (data_seed_6)    ← 2nd time, should improve
- E7:  hiring_debrief      (data_seed_7)
- E8:  inbox_triage        (data_seed_8)    ← 2nd time, should improve
- E9:  post_incident       (data_seed_9)
-E10:  morning_brief       (data_seed_10)   ← 3rd time, should be cheapest
+ E1:  client_escalation   (data_seed_1)    ← 1st attempt
+ E2:  code_bug_fix        (data_seed_2)    ← 1st attempt
+ E3:  client_escalation   (data_seed_3)    ← 2nd attempt, should improve
+ E4:  client_escalation   (data_seed_4)    ← 3rd attempt
+ E5:  code_bug_fix        (data_seed_5)    ← 2nd attempt, should improve
+ E6:  code_bug_fix        (data_seed_6)    ← 3rd attempt
+ E7:  client_escalation   (data_seed_7)    ← 4th attempt
+ E8:  code_bug_fix        (data_seed_8)    ← 4th attempt
+ E9:  client_escalation   (data_seed_9)    ← 5th attempt, should be best
+E10:  code_bug_fix        (data_seed_10)   ← 5th attempt, should be best
 ```
 
-**Epoch B produces a completely different sequence (N=13):**
+Each scenario appears 4-8 times with different data. The learning curve per scenario is the signal — not a noisy global regression across unrelated tasks.
 
-```
- E1:  inbox_triage        (data_seed_1)
- E2:  post_incident       (data_seed_2)
- E3:  morning_brief       (data_seed_3)
- ...different order, different length, different data...
-```
+**Why 2 scenarios, not 1 or 7:**
+
+| Count | Pros | Cons |
+|-------|------|------|
+| 1 | Maximum repetitions, cleanest signal | No breadth testing, over-fits to one task type |
+| 2 | Strong signal (4-8 reps each), tests two domains | Moderate breadth |
+| 7 | Maximum breadth | ~2 reps each, noisy signal, hard to measure learning |
+
+Two is the sweet spot: enough repetitions for a clear learning curve, enough variety to prevent single-scenario overfitting.
+
+**Scenario selection criteria:**
+- **Deep**: many sub-tasks, decision points, safety constraints (room to improve)
+- **Different domains**: one knowledge-worker, one code/technical
+- **Complex enough** that a first attempt is genuinely harder than a fifth attempt with accumulated patterns
 
 ### Key Properties
 
-- **Permuted order**: can't optimize for "task X always comes at position Y"
-- **Variable N**: can't optimize for "be cheap on the last 4 episodes"
-- **Each task type appears 2-3 times** with different data
-- **Interleaving**: learning must persist across different task types
-- **Transfer**: learning from inbox_triage might help morning_brief
+- **Repeated scenarios**: 4-8 attempts per scenario = clear per-scenario learning curve
+- **Variable N**: can't predict when eval ends
+- **Different data each attempt**: same scenario template, completely different content
+- **Two domains**: learning must work for both knowledge work and code tasks
 
 ---
 
@@ -446,20 +458,28 @@ E10:  morning_brief       (data_seed_10)   ← 3rd time, should be cheapest
   "miner_uid": 42,
   "pack_hash": "abc123...",
   "episodes": [
-    {"id": 1, "scenario": "morning_brief",    "quality": 0.55},
-    {"id": 2, "scenario": "inbox_triage",      "quality": 0.60},
-    {"id": 3, "scenario": "client_escalation", "quality": 0.52},
-    {"id": 4, "scenario": "morning_brief",     "quality": 0.78},
-    {"id": 5, "scenario": "team_standup",      "quality": 0.81},
-    {"id": 6, "scenario": "inbox_triage",      "quality": 0.85}
+    {"id": 1,  "scenario": "client_escalation", "quality": 0.45},
+    {"id": 2,  "scenario": "code_bug_fix",       "quality": 0.40},
+    {"id": 3,  "scenario": "client_escalation", "quality": 0.62},
+    {"id": 4,  "scenario": "code_bug_fix",       "quality": 0.58},
+    {"id": 5,  "scenario": "client_escalation", "quality": 0.71},
+    {"id": 6,  "scenario": "code_bug_fix",       "quality": 0.65},
+    {"id": 7,  "scenario": "client_escalation", "quality": 0.78},
+    {"id": 8,  "scenario": "code_bug_fix",       "quality": 0.72},
+    {"id": 9,  "scenario": "client_escalation", "quality": 0.82},
+    {"id": 10, "scenario": "code_bug_fix",       "quality": 0.79}
   ],
-  "mean_quality": 0.685,
-  "learning_rate": 0.054,
-  "final_score": 0.722
+  "per_scenario": {
+    "client_escalation": {"mean": 0.676, "learning_rate": 0.088},
+    "code_bug_fix":       {"mean": 0.628, "learning_rate": 0.094}
+  },
+  "overall_quality": 0.652,
+  "overall_learning": 0.091,
+  "final_score": 0.711
 }
 ```
 
-The quality trajectory is the complete evaluation output.
+Per-scenario learning curves — each with 5 data points — are the evaluation output.
 
 ---
 
@@ -470,7 +490,7 @@ Four mechanisms work together:
 | Mechanism | What it prevents |
 |-----------|-----------------|
 | Varying data (Tier 3 fixtures) | Memorization of specific answers |
-| Permuted episode order | Position-based optimization |
+| Per-scenario regression (4-8 reps) | Noise-based gaming (too few data points to fake a trend) |
 | Variable episode count (N=8-16) | Endpoint targeting (inflate early, deflate late) |
 | LLM judge (not cost-based) | Scheduled efficiency tricks (e.g. "be verbose early, concise later") |
 
@@ -502,11 +522,11 @@ The primary unknowns are in the **multi-episode learning signal** (how to reliab
 
 ## Known Risks & Mitigations
 
-### 1. Weak learning signal with small N
+### 1. ~~Weak learning signal with small N~~ — Resolved
 
-With N=8-16 and each scenario appearing ~2 times, the quality trajectory has few data points. A genuine learning agent may show improvement on only 3-4 repeated scenarios — the rest are first encounters that contribute noise.
+~~With many scenarios and few repetitions, the learning signal was noisy.~~
 
-**Mitigation:** Increase the minimum N, or compute per-scenario quality deltas (compare same scenario across repeats) rather than relying on global regression slope. Per-scenario comparison is a stronger signal with less noise.
+**Resolution:** Reduced to 2 deep scenarios repeated 4-8 times each. Per-scenario regression over 4-8 data points is statistically meaningful. This is a direct fix, not a mitigation.
 
 ### 2. SKILL.md growth vs. quality trade-off
 
@@ -550,35 +570,29 @@ A miner whose SKILL.md produces high-quality trajectories from episode 1 shows n
 
 ---
 
-## What This Unlocks: New Scenario Categories
+## Season 1 Scenarios
 
-### Code Tasks
+Two deep, complex scenarios — one knowledge-worker, one code/technical. Each must have enough sub-tasks and decision points that a first attempt is genuinely harder than a fifth.
 
-Seed the sandbox with a git repo containing a bug. Agent must find the bug, fix it, run tests, commit.
+### Scenario A: Client Escalation (Knowledge Worker)
 
-**Score**: do tests pass? Is the diff minimal and correct?
+P0 bug report from a client. Agent must triage emails, check GitHub for the relevant PR, post to Slack (without leaking confidential info), create follow-up tasks, send an incident update email. Involves: email, Slack, GitHub, Notion/tasks, calendar — all stateful.
 
-### Data Analysis
+**Why it's deep:** 15-20 judge criteria. Safety constraints (confidential data). Multi-service coordination. Many ways to do it wrong on first attempt, many patterns to learn (check GitHub before emailing, never post SOC 2 info to public channels, etc.).
 
-Seed a SQLite database with business data. Agent must query, analyze, produce a summary.
+### Scenario B: Code Bug Fix (Technical)
 
-**Score**: are the numbers accurate? Did the query return correct results?
+Git repo seeded with a bug. Agent must read the issue, find the bug, write a fix, run tests, commit. Different bug type and codebase each attempt (procedural generation via Tier 3).
 
-### Customer Support
+**Why it's deep:** Requires reading code, reasoning about the bug, writing a correct fix, running tests. Many sub-skills to learn (read tests first, check error messages, verify fix doesn't break other tests, keep diff minimal).
 
-Seed with a ticket system (mock Zendesk/Linear). Agent must triage, respond, escalate.
+### Future Seasons
 
-**Score**: check ticket states + response quality + SLA compliance.
-
-### Multi-Step Workflows
-
-Agent reads email → asks user for approval (multi-turn) → creates draft → user approves → agent sends. The sandbox holds real state throughout.
-
-### Error Resilience
-
-Configure mock services to fail intermittently. Email service returns 503 on first attempt. Calendar API has 2-second latency.
-
-**Score**: did the task eventually succeed despite errors?
+Additional scenario types for Season 2+:
+- **Data analysis**: SQLite database + business questions
+- **Customer support**: Ticket triage + SLA compliance
+- **Multi-step workflows**: Approval flows, multi-turn interactions
+- **Error resilience**: Intermittent service failures
 
 ---
 
@@ -592,9 +606,9 @@ Gaming surface: memorize fixture data, reverse-engineer check types, hardcode sc
 
 ### After (Season 1)
 
-Miners optimize for: "most capable self-learning agent that improves across diverse tasks in a real environment."
+Miners optimize for: "most capable self-learning agent that measurably improves across repeated attempts at complex tasks."
 
-Gaming surface: reduced — procedural data prevents memorization, outcome-based scoring prevents regex gaming, cost curve prevents snapshot optimization, diverse scenarios prevent over-specialization.
+Gaming surface: reduced — procedural data prevents memorization, LLM judge prevents regex gaming, per-scenario quality curves over 4-8 repetitions prevent noise-based gaming.
 
 The evaluation structurally selects for agent engineering capability over benchmark optimization.
 
@@ -607,7 +621,7 @@ The evaluation structurally selects for agent engineering capability over benchm
 - Build fixture generation prompts + JSON schemas for existing scenarios
 - Implement PRNG-based structural param derivation from `epoch_seed`
 - Implement fixture_hash consensus mechanism
-- **Test:** Generate fixtures for morning_brief, compare quality to hand-crafted
+- **Test:** Generate fixtures for client_escalation, compare quality to hand-crafted
 - **Still uses v1 mock tools** — fixtures are just loaded differently
 
 This phase is deployable independently. Even without the Docker sandbox, LLM-generated fixtures eliminate memorization and remove the fixture maintenance burden.
@@ -617,7 +631,7 @@ This phase is deployable independently. Even without the Docker sandbox, LLM-gen
 - Build base Docker image with MailHog + lightweight mock APIs (Notion, Calendar, Slack)
 - Load Tier 3 fixtures into mock services at container start
 - Implement observation capture (transcript + service logs + fs diff)
-- Port morning_brief and client_escalation to sandbox format
+- Port client_escalation and code_bug_fix to sandbox format
 - **Test:** Run side-by-side with v1, compare scoring agreement
 
 ### Phase 3: LLM Runtime Mocks (Tier 2)
@@ -630,10 +644,10 @@ This phase is deployable independently. Even without the Docker sandbox, LLM-gen
 ### Phase 4: Multi-Episode + SKILL.md
 
 - Implement episode runner with persistent workspace
-- Implement cost curve scoring (learning_efficiency + final_score)
-- Implement permuted sequence + variable N from epoch_seed
+- Implement per-scenario quality curve scoring
+- Implement variable N from epoch_seed, 2-scenario interleaving
 - Port AGENTS.md → SKILL.md format
-- **Test:** Run 10-episode sequences, verify cost curve measurement
+- **Test:** Run 10-episode sequences (5 reps × 2 scenarios), verify learning curves
 
 ### Phase 5: Scoring Rewrite
 
@@ -641,10 +655,9 @@ This phase is deployable independently. Even without the Docker sandbox, LLM-gen
 - Update LLM judge to consume shell transcripts + service state
 - Define scoring spec YAML format for state checks
 
-### Phase 6: Scenario Expansion + Full Cutover
+### Phase 6: Season 2 Preparation
 
-- Add code tasks (git repo + bug fix) — leverages Gitea (Tier 1)
-- Add data analysis (SQLite + LLM-generated business data)
+- Add new scenario types (data analysis, customer support, multi-step workflows)
 - Add error simulation (configure Tier 1 services to fail intermittently)
 - Deprecate old fixture-based mock tools
 - Update miner SDK/docs for new environment
@@ -658,7 +671,7 @@ The entire system needs:
 1. **Sandbox**: Docker + mock services + SKILL.md mount
 2. **Episode runner**: Loop that resets data, delivers prompt, captures transcript
 3. **LLM judge**: Score each trajectory 0.0–1.0 (already built in v1, extend to quality scoring)
-4. **Scorer**: `final_score = mean(quality_scores) * (1 + learning_rate)`
+4. **Scorer**: Per-scenario learning curves → `final_score = mean(quality) * (1 + mean(learning_rates))`
 
 Four components. The judge already exists. The new work is: sandbox + episode runner.
 
